@@ -1,3 +1,4 @@
+use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
@@ -160,6 +161,16 @@ pub struct TrackParams {
     #[id = "ramp_seed"]
     pub ramp_seed: IntParam,
 
+    /// When on, the pitch ramp runs over `ramp_length` instead of the
+    /// sequence length, following the song position, so the melody drifts in
+    /// and out of phase with the rhythm.
+    #[id = "ramp_free"]
+    pub ramp_free: BoolParam,
+
+    /// Ramp length when free: steps for Up/Down/Random, notes for Climb/Descend.
+    #[id = "ramp_length"]
+    pub ramp_length: IntParam,
+
     /// Fixed velocity (0-127). Also used when the velocity ramp is off or has length 1.
     #[id = "velocity"]
     pub velocity: IntParam,
@@ -186,6 +197,11 @@ pub struct TrackParams {
     /// Euclidean hits manually removed with Cmd+click.
     #[persist = "removed"]
     pub removed: AtomicU32,
+
+    /// Per-step pitch offsets in scale degrees, set by Cmd+dragging a step.
+    /// Added on top of everything else; saved with the project.
+    #[persist = "pitch_offsets"]
+    pub pitch_offsets: AtomicCell<[i8; MAX_STEPS]>,
 }
 
 impl TrackParams {
@@ -258,6 +274,8 @@ impl TrackParams {
                     "uni" | "unipolar" | "off" | "0" => Some(false),
                     _ => None,
                 })),
+            ramp_free: BoolParam::new(name("Ramp Free Length"), false),
+            ramp_length: IntParam::new(name("Ramp Length"), 16, IntRange::Linear { min: 1, max: 32 }),
             ramp_seed: IntParam::new(name("Ramp Seed"), 1, IntRange::Linear { min: 0, max: 9999 })
                 .non_automatable(),
             velocity: IntParam::new(name("Velocity"), 75, IntRange::Linear { min: 0, max: 127 }),
@@ -267,6 +285,7 @@ impl TrackParams {
             vel_length: IntParam::new(name("Velocity Length"), 4, IntRange::Linear { min: 1, max: 16 }),
             added: AtomicU32::new(0),
             removed: AtomicU32::new(0),
+            pitch_offsets: AtomicCell::new([0; MAX_STEPS]),
         }
     }
 
@@ -335,18 +354,39 @@ impl TrackParams {
         }
     }
 
-    /// Scale degree (relative to the root) of grid cell `cell`. Pitch belongs
-    /// to the cell, not to the moment it plays: playback direction only moves
-    /// the playhead, so the grid always shows what will sound. Climb/Descend
-    /// number the notes in grid order.
-    pub fn step_degree(&self, cell: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
+    /// Scale degree (relative to the root) played on grid cell `cell` at
+    /// `global_step` (steps since beat 0).
+    ///
+    /// With the ramp's length following the sequence, pitch belongs to the
+    /// cell: directions only move the playhead and the grid always shows what
+    /// will sound (Climb/Descend number notes in grid order). With a free
+    /// length, the ramp follows the song position instead (steps, or notes in
+    /// playing order for Climb/Descend), so it drifts against the pattern.
+    /// The step's own pitch offset is added on top either way.
+    pub fn step_degree(&self, global_step: i64, cell: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
         let len = self.length.value() as usize;
-        let note_index = pattern[..cell.min(len)].iter().filter(|&&h| h).count();
-        self.pitch.value() + self.ramp().degree(cell, note_index, len, self.scale.value())
+        let ramp = self.ramp();
+        let ramp_degree = if self.ramp_free.value() {
+            let n = self.ramp_length.value().max(1) as i64;
+            let note_index = song_note_index(global_step, len, self.direction.value(), pattern).rem_euclid(n);
+            ramp.degree(global_step.rem_euclid(n) as usize, note_index as usize, n as usize, self.scale.value())
+        } else {
+            let note_index = pattern[..cell.min(len)].iter().filter(|&&h| h).count();
+            ramp.degree(cell, note_index, len, self.scale.value())
+        };
+        let offset = self.pitch_offsets.load()[cell.min(MAX_STEPS - 1)] as i32;
+        self.pitch.value() + ramp_degree + offset
     }
 
-    pub fn step_note(&self, cell: usize, pattern: &[bool; MAX_STEPS]) -> u8 {
-        scale_note(self.root.value(), self.step_degree(cell, pattern), self.scale.value())
+    pub fn step_note(&self, global_step: i64, cell: usize, pattern: &[bool; MAX_STEPS]) -> u8 {
+        scale_note(self.root.value(), self.step_degree(global_step, cell, pattern), self.scale.value())
+    }
+
+    /// Forget all manual edits: added/removed notes and per-step pitches.
+    pub fn clear_edits(&self) {
+        self.added.store(0, Ordering::Relaxed);
+        self.removed.store(0, Ordering::Relaxed);
+        self.pitch_offsets.store([0; MAX_STEPS]);
     }
 
     pub fn step_beats(&self) -> f64 {
@@ -530,7 +570,7 @@ impl Plugin for EuclidSeq {
                 if !pattern[cell] || !passes_probability(probability, t, k) {
                     continue;
                 }
-                let note = track.step_note(cell, &pattern);
+                let note = track.step_note(k, cell, &pattern);
                 let velocity = track.step_velocity(k, &pattern) as f32 / 127.0;
                 let channel = (track.channel.value() - 1) as u8;
 

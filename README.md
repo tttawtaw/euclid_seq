@@ -13,10 +13,11 @@ The controls sit in three panels:
 - **Pitch + Pitch Ramp:** which notes.
 - **Global:** settings shared by all tracks.
 
-- **ON / OFF** – only track 1 is on by default.
+- **ON / OFF** – only track 1 is on by default. Clicking a track's tab also switches it on, so you hear it straight away.
 - **CH** – MIDI channel (defaults: track 1 → ch 1, track 2 → ch 2, …). Drag or scroll.
-- **CLEAR** – removes every note from the track (Pulses to 0, manual edits cleared).
-- **RESET** – returns all of the track's settings to their defaults and clears manual edits. It keeps ON and CH, so the track isn't silenced or rerouted.
+- **COPY / PASTE** – copy a track, go to another and paste it as a starting point for a variation. Everything is copied (pattern, hand-placed notes, step pitches, all settings) except the target's ON switch and MIDI channel, so it keeps playing its own instrument. The COPY button shows which track is on the clipboard, and the clipboard lasts as long as the plugin is loaded.
+- **CLEAR** – removes every note from the track (Pulses to 0, hand-placed notes and step pitches cleared).
+- **RESET** – returns all of the track's settings to their defaults and clears hand-placed notes and step pitches. It keeps ON and CH, so the track isn't silenced or rerouted.
 
 ## Controls
 
@@ -58,8 +59,9 @@ Long gates let notes overlap, up to 32 per track; past that, the oldest is relea
 | Range | 1 / 2 / 4 oct | How far the ramp reaches. |
 | Polarity | + / ± | `+` goes from the root upwards; `±` spans below and above the root. |
 | Dice | – | (Random only) re-rolls the random melody. The melody is saved with your project. |
+| Length + FREE | 1–32 | **FREE off** (default): the ramp spans the sequence (Steps). **FREE on**: the ramp has its own length (steps for Up/Down/Random, notes for Climb/Descend) and follows the song position, so the melody drifts in and out of phase with the rhythm. Turning the knob switches FREE on. |
 
-Up, Down and Random are tied to step positions, not to hits. So Rotate, Pulses and E. Steps change *which* notes of the contour get played, which makes them a quick way to vary a melody. Climb and Descend follow the notes that actually play, so you always hear the up-up-down figure, and they restart at the top of each loop. With a ramp active, each grid cell shows its pitch as a short line (higher line = higher note), and hovering a cell shows its note name.
+With FREE off, Up, Down and Random are tied to step positions, not to hits. So Rotate, Pulses and E. Steps change *which* notes of the contour get played, which makes them a quick way to vary a melody. Climb and Descend follow the notes that actually play, so you always hear the up-up-down figure, and they restart at the top of each loop. With FREE on, a step's pitch changes from pass to pass. The grid always shows the pitches of the pass now playing: each cell's pitch is a short line (higher line = higher note), and hovering a cell shows its note name.
 
 **Velocity**
 
@@ -76,6 +78,7 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 
 - **Cmd+click** a step to add a note, or Cmd+click a note to remove it. **Ctrl+click** and **right-click** do the same, which helps in hosts that keep the Cmd key for themselves.
 - Repeat the click to undo an edit.
+- **Cmd+drag** a step up or down to change its pitch, in scale steps (8 px per step, ±24), like turning a knob. Ctrl+drag and right-drag do the same. The note name shows on the step while you drag, and a moved step keeps a small `+2` / `-1` label. Step pitches add on top of Pitch and any ramp, and are saved with your project. Drag back to 0 to undo.
 - Added notes get a corner notch; removed ones keep an outline.
 - Edits stick to their step position and are saved with your project.
 - A plain click on a step still sets the sequence length.
@@ -88,8 +91,8 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 | Scale | Changing it sets every track to that scale. |
 | Following | Lit for each track that still matches the global key and scale. |
 
-| CLEAR ALL | Removes every note from all 4 tracks. |
-| RESET ALL | Returns the whole plugin to its factory settings: every track (including ON switches and MIDI channels), the global key and scale, and all hand-placed notes. |
+| CLEAR ALL | Removes every note from all 4 tracks (and their step pitches). |
+| RESET ALL | Returns the whole plugin to its factory settings: every track (including ON switches and MIDI channels), the global key and scale, all hand-placed notes and step pitches. |
 
 CLEAR ALL and RESET ALL ask for a second click ("SURE?") within 3 seconds, because hand-placed notes can't be brought back with your DAW's undo.
 
@@ -128,7 +131,7 @@ GUI without a DAW (dev only):
 cargo run --release --features standalone -- --backend dummy --tempo 120
 ```
 
-Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend), manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
+Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend and free-length drift), manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
 
 ```sh
 cargo test --lib
@@ -144,7 +147,7 @@ cargo test --lib
 
 - `src/sequencer.rs` – pure logic: Bjorklund, rotation, scales, ramps, note names, block tick timing (unit tested, allocation‑free)
 - `src/lib.rs` – plugin, per-track parameters, MIDI output in `process()`
-- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), panels, knobs with type-in, link button, ramps, global section, Clear/Reset (per track and all)
+- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), panels, knobs with type-in, step pitch dragging, link button, ramps, global section, Copy/Paste, Clear/Reset (per track and all)
 
 ## Known notes
 

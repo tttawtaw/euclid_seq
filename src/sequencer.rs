@@ -755,6 +755,20 @@ mod tests {
         assert_eq!(idx, vec![0, 1, 1, 2, 2, 3, 3]);
     }
 
+    /// A free-length ramp indexed by song position drifts against a pattern
+    /// of a different length: the same cell gets a different pitch each pass
+    /// until the two cycles line up again.
+    #[test]
+    fn free_length_ramp_drifts() {
+        let r = ramp(RampMode::Up, 1, false); // degrees 0..=7 in Major
+        let (seq_len, ramp_len) = (8i64, 5usize);
+        let cell0: Vec<_> = (0..6)
+            .map(|pass| r.degree((pass * seq_len).rem_euclid(ramp_len as i64) as usize, 0, ramp_len, Scale::Major))
+            .collect();
+        // Cell 0 is hit at song steps 0, 8, 16, …: ramp positions 0, 3, 1, 4, 2, 0
+        assert_eq!(cell0, vec![0, 5, 2, 7, 4, 0]);
+    }
+
     #[test]
     fn probability() {
         assert!((0..1000).all(|k| passes_probability(100, 0, k)));
