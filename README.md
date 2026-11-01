@@ -58,7 +58,7 @@ Long gates let notes overlap, up to 32 per track; past that, the oldest is relea
 
 | Control | Options | What it does |
 |---|---|---|
-| Mode (dropdown) | Off, Up, Down, Up-Down, Down-Up, Climb, Descend, Random | Up and Down sweep across the ramp; Up-Down and Down-Up go there and back like a triangle wave; Climb goes up, up, down, repeating (Descend: down, down, up) and wraps at the edge of the range; Random gives every step a fixed random note. Still an ordinary automatable parameter. |
+| Mode (dropdown) | Off, Up, Down, Up-Down, Down-Up, Climb, Descend, Random | Up and Down sweep across the ramp; Up-Down and Down-Up go there and back like a triangle wave; Climb goes up, up, down, repeating (Descend: down, down, up) and wraps at the edge of the range; its jumps grow with the range (1 scale step per octave of range: 1 oct = +1 +1 −1, 2 oct = +2 +2 −2, 4 oct = +4 +4 −4); Random gives every step a fixed random note. Still an ordinary automatable parameter. |
 | Range | 1 / 2 / 4 oct | How far the ramp reaches. |
 | Range ST | −36…+36 semitones | A custom range instead of 1/2/4 octaves: turning the knob selects it (dimmed when not in use); clicking 1/2/4 goes back to octaves. Positive reaches above the root, negative below it, and ± polarity uses both sides. It stays in key: the ramp goes to the highest scale note within that many semitones (+7 in Minor = C up to G). |
 | Polarity | + / ± | `+` goes from the root upwards; `±` spans below and above the root. |

@@ -420,8 +420,15 @@ impl Ramp {
                 lo + (r % (hi - lo + 1) as u64) as i32
             }
             RampMode::Climb | RampMode::Descend => {
+                // Jumps grow with the range: one scale step per octave of
+                // range (rounded, at least 1), so a 1-oct range moves +1 +1 -1,
+                // 2 oct +2 +2 -2, 4 oct +4 +4 -4. Wraps on that same grid.
+                let per_octave = scale.intervals().len() as f64;
+                let span = degrees_within(self.semitones.abs(), scale);
+                let jump = ((span as f64 / per_octave).round() as i32).max(1);
+                let levels = (hi - lo) / jump + 1;
                 let k = note_index as i32;
-                let rise = (k / 3 + k % 3) % (hi - lo + 1);
+                let rise = ((k / 3 + k % 3) % levels) * jump;
                 if self.mode == RampMode::Climb {
                     lo + rise
                 } else {
@@ -772,12 +779,35 @@ mod tests {
 
     #[test]
     fn climb_and_descend() {
-        let climb = ramp(RampMode::Climb, 2, false); // degrees 0..=14
+        // 1 octave: single scale steps, +1 +1 -1.
+        let climb = ramp(RampMode::Climb, 1, false); // degrees 0..=7
         let up: Vec<_> = (0..9).map(|n| climb.degree(0, n, 16, Scale::Major)).collect();
         assert_eq!(up, vec![0, 1, 2, 1, 2, 3, 2, 3, 4]);
-        let descend = ramp(RampMode::Descend, 2, false);
+        // Wider ranges make wider jumps: 2 oct = +2 +2 -2, 4 oct = +4 +4 -4.
+        let climb2 = ramp(RampMode::Climb, 2, false);
+        let up2: Vec<_> = (0..6).map(|n| climb2.degree(0, n, 16, Scale::Major)).collect();
+        assert_eq!(up2, vec![0, 2, 4, 2, 4, 6]);
+        let climb4 = ramp(RampMode::Climb, 4, false);
+        let up4: Vec<_> = (0..6).map(|n| climb4.degree(0, n, 16, Scale::Major)).collect();
+        assert_eq!(up4, vec![0, 4, 8, 4, 8, 12]);
+        let descend = ramp(RampMode::Descend, 2, false); // from 14 down
         let down: Vec<_> = (0..6).map(|n| descend.degree(0, n, 16, Scale::Major)).collect();
-        assert_eq!(down, vec![14, 13, 12, 13, 12, 11]);
+        assert_eq!(down, vec![14, 12, 10, 12, 10, 8]);
+        // Custom semitone ranges round to the nearest octave count (min 1).
+        let custom = |st| Ramp { mode: RampMode::Climb, semitones: st, bipolar: false, seed: 1 };
+        assert_eq!(custom(36).degree(0, 1, 16, Scale::Major), 3);
+        assert_eq!(custom(7).degree(0, 1, 16, Scale::Major), 1);
+        // Every value stays in range and on the jump grid.
+        for oct in [1, 2, 4] {
+            for bip in [false, true] {
+                let r = ramp(RampMode::Climb, oct, bip);
+                let (lo, hi) = r.bounds(Scale::Minor);
+                for n in 0..300 {
+                    let d = r.degree(0, n, 16, Scale::Minor);
+                    assert!((lo..=hi).contains(&d) && (d - lo) % oct == 0, "{oct} {bip} {n} {d}");
+                }
+            }
+        }
         // Wraps inside the range instead of running away.
         let small = ramp(RampMode::Climb, 1, true); // -5..=5 in pentatonic
         assert!((0..200).all(|n| (-5..=5).contains(&small.degree(0, n, 16, Scale::MinorPentatonic))));
