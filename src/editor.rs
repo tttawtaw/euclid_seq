@@ -477,6 +477,8 @@ fn scale_combo(ui: &mut Ui, id: impl std::hash::Hash, current: Scale, width: f32
     let mut picked = None;
     egui::ComboBox::from_id_salt(id)
         .width(width)
+        // Tall enough to show every scale without scrolling.
+        .height(420.0)
         .selected_text(egui::RichText::new(current.name()).color(TEXT))
         .show_ui(ui, |ui| {
             for scale in Scale::ALL {
@@ -551,11 +553,16 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
             ui.add_space(14.0);
             group(ui, "VELOCITY", |ui| {
                 knob(ui, setter, &track.velocity, "VELOCITY", KnobStyle::typeable());
-                let mode = KnobStyle { stepped: Some(3), ..Default::default() };
-                knob(ui, setter, &track.vel_mode, "MODE", mode);
+                // Same shapes as the pitch ramp, as a dropdown (still automatable).
+                labelled(ui, "MODE", |ui| enum_combo(ui, ("vel_mode", page), setter, &track.vel_mode, 92.0));
                 knob(ui, setter, &track.vel_low, "LOW", KnobStyle::typeable());
                 knob(ui, setter, &track.vel_high, "HIGH", KnobStyle::typeable());
                 knob(ui, setter, &track.vel_length, "LENGTH", KnobStyle::typeable());
+                let random = track.vel_mode.value() == RampMode::Random;
+                ui.vertical(|ui| {
+                    ui.add_space(DIAL_Y - 16.0);
+                    dice_button(ui, setter, &track.vel_seed, random);
+                });
             });
         });
 

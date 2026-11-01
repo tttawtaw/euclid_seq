@@ -52,7 +52,7 @@ Long gates let notes overlap, up to 32 per track; past that, the oldest is relea
 | Pitch | −48…+48 | Transposition in **scale degrees**, so the sequence always stays in key. |
 | Root | C0–C6 | Root note (MIDI 60 = C3, the Ableton/Bitwig convention). Type a value like `F#2` or `54`. |
 | Octave − / + | 0–6 | Moves the root by whole octaves, keeping the note (scroll works too). |
-| Scale | 8 scales | Major, Minor, Dorian, Mixolydian, Harmonic Minor, Major Pentatonic, Minor Pentatonic, Chromatic. |
+| Scale | 15 scales | Major, Dorian, Phrygian, Lydian, Mixolydian, Minor, Locrian, Harmonic Minor, Melodic Minor, Phrygian Dominant, Major Pentatonic, Minor Pentatonic, Blues, Whole Tone, Chromatic. |
 
 **Pitch ramp** – gives each step its own pitch, always locked to the scale.
 
@@ -72,9 +72,10 @@ With FREE off, Up, Down and Random are tied to step positions, not to hits. So R
 | Control | Range | What it does |
 |---|---|---|
 | Velocity | 0–127 (default 75) | Fixed velocity, used when the ramp is off or its length is 1. 0 is silent (MIDI treats it as a note-off). |
-| Mode | Off / Up / Down | Ramp from Low to High (Up) or High to Low (Down). |
+| Mode (dropdown) | Off, Up, Down, Up-Down, Down-Up, Climb, Descend, Random | The same shapes as the pitch ramp, between Low and High: Up/Down sweep, Up-Down/Down-Up go there and back, Climb/Descend step up, up, down (or down, down, up) through Length levels, Random gives each note of the cycle a fixed random velocity. Automatable. |
+| Dice | – | (Random only) re-rolls the random velocities. |
 | Low / High | 0–127 | The two values the ramp moves between. |
-| Length | 1–16 | Notes per ramp before it starts again. 2 alternates Low/High; 1 = fixed Velocity. Not tied to the pattern: it can be longer than the number of notes. |
+| Length | 1–16 | Notes per ramp cycle before it starts again. 2 alternates Low/High (Up/Down); 1 = fixed Velocity. Not tied to the pattern: it can be longer than the number of notes. |
 
 The velocity ramp counts *notes* in the order they're played (so Reverse and Ping-Pong are taken into account), not steps, and keeps counting across sequence loops. When Length differs from the number of notes in the pattern, the velocities drift against the rhythm and only line up again after several loops. That's deliberate, and it keeps a repeating pattern moving. It's worked out from the song position, so the same spot in your song always gets the same velocities. Each hit shows its velocity for the loop currently playing as a bar along the bottom of its cell.
 
@@ -136,7 +137,7 @@ GUI without a DAW (dev only):
 cargo run --release --features standalone -- --backend dummy --tempo 120
 ```
 
-Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend, free-length drift and semitone ranges in every scale), manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
+Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend, free-length drift and semitone ranges in every scale), velocity ramp shapes, new scales, migration of old projects, manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
 
 ```sh
 cargo test --lib
@@ -157,7 +158,7 @@ cargo test --lib
 ## Known notes
 
 - The window size is no longer saved in projects. Earlier versions saved it, which could make projects from an older version open the window too small for newer controls.
-- v0.8 reordered the ramp modes (Random is now last). Projects saved with older versions are translated on load, so their ramp modes are unchanged.
+- v0.9 added scales and reordered the list; v0.8 reordered the ramp modes (Random is now last). Projects saved with older versions are translated on load, so their scales and ramp modes are unchanged.
 - v0.2 changed every parameter ID (they now carry a `_1`…`_4` track suffix), so projects saved with v0.1 open with default settings.
 
 - `clap-validator` 0.4.1 reports failures in the `state-reproducibility-*` and `state-invalid-random` tests. nih-plug's own reference `gain` example fails the same four tests with the same validator, so this is a framework/validator interaction rather than something in this plugin; all processing, parameter and transport tests pass.

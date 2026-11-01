@@ -144,46 +144,104 @@ pub fn pattern(length: usize, euclid_steps: usize, pulses: usize, rotate: i32) -
 }
 
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+/// Saved by stable id, so the list can be ordered musically (modes by
+/// brightness of the 7-note scales, then minor variants, then the rest).
+/// Projects saved before ids existed are migrated using `SCALE_LEGACY_ORDER`.
 pub enum Scale {
+    #[id = "major"]
     #[name = "Major"]
     Major,
-    #[name = "Minor"]
-    Minor,
+    #[id = "dorian"]
     #[name = "Dorian"]
     Dorian,
+    #[id = "phrygian"]
+    #[name = "Phrygian"]
+    Phrygian,
+    #[id = "lydian"]
+    #[name = "Lydian"]
+    Lydian,
+    #[id = "mixolydian"]
     #[name = "Mixolydian"]
     Mixolydian,
+    #[id = "minor"]
+    #[name = "Minor"]
+    Minor,
+    #[id = "locrian"]
+    #[name = "Locrian"]
+    Locrian,
+    #[id = "harmonic_minor"]
     #[name = "Harmonic Minor"]
     HarmonicMinor,
+    #[id = "melodic_minor"]
+    #[name = "Melodic Minor"]
+    MelodicMinor,
+    #[id = "phrygian_dominant"]
+    #[name = "Phrygian Dominant"]
+    PhrygianDominant,
+    #[id = "major_pentatonic"]
     #[name = "Major Pentatonic"]
     MajorPentatonic,
+    #[id = "minor_pentatonic"]
     #[name = "Minor Pentatonic"]
     MinorPentatonic,
+    #[id = "blues"]
+    #[name = "Blues"]
+    Blues,
+    #[id = "whole_tone"]
+    #[name = "Whole Tone"]
+    WholeTone,
+    #[id = "chromatic"]
     #[name = "Chromatic"]
     Chromatic,
 }
 
+/// The order scales had (and were saved by position in) before v0.9.
+pub const SCALE_LEGACY_ORDER: [&str; 8] = [
+    "major",
+    "minor",
+    "dorian",
+    "mixolydian",
+    "harmonic_minor",
+    "major_pentatonic",
+    "minor_pentatonic",
+    "chromatic",
+];
+
 impl Scale {
-    pub const ALL: [Scale; 8] = [
+    pub const ALL: [Scale; 15] = [
         Scale::Major,
-        Scale::Minor,
         Scale::Dorian,
+        Scale::Phrygian,
+        Scale::Lydian,
         Scale::Mixolydian,
+        Scale::Minor,
+        Scale::Locrian,
         Scale::HarmonicMinor,
+        Scale::MelodicMinor,
+        Scale::PhrygianDominant,
         Scale::MajorPentatonic,
         Scale::MinorPentatonic,
+        Scale::Blues,
+        Scale::WholeTone,
         Scale::Chromatic,
     ];
 
     pub fn intervals(self) -> &'static [i32] {
         match self {
             Scale::Major => &[0, 2, 4, 5, 7, 9, 11],
-            Scale::Minor => &[0, 2, 3, 5, 7, 8, 10],
             Scale::Dorian => &[0, 2, 3, 5, 7, 9, 10],
+            Scale::Phrygian => &[0, 1, 3, 5, 7, 8, 10],
+            Scale::Lydian => &[0, 2, 4, 6, 7, 9, 11],
             Scale::Mixolydian => &[0, 2, 4, 5, 7, 9, 10],
+            Scale::Minor => &[0, 2, 3, 5, 7, 8, 10],
+            Scale::Locrian => &[0, 1, 3, 5, 6, 8, 10],
             Scale::HarmonicMinor => &[0, 2, 3, 5, 7, 8, 11],
+            Scale::MelodicMinor => &[0, 2, 3, 5, 7, 9, 11],
+            Scale::PhrygianDominant => &[0, 1, 4, 5, 7, 8, 10],
             Scale::MajorPentatonic => &[0, 2, 4, 7, 9],
             Scale::MinorPentatonic => &[0, 3, 5, 7, 10],
+            Scale::Blues => &[0, 3, 5, 6, 7, 10],
+            Scale::WholeTone => &[0, 2, 4, 6, 8, 10],
             Scale::Chromatic => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         }
     }
@@ -191,12 +249,19 @@ impl Scale {
     pub fn name(self) -> &'static str {
         match self {
             Scale::Major => "Major",
-            Scale::Minor => "Minor",
             Scale::Dorian => "Dorian",
+            Scale::Phrygian => "Phrygian",
+            Scale::Lydian => "Lydian",
             Scale::Mixolydian => "Mixolydian",
+            Scale::Minor => "Minor",
+            Scale::Locrian => "Locrian",
             Scale::HarmonicMinor => "Harmonic Minor",
+            Scale::MelodicMinor => "Melodic Minor",
+            Scale::PhrygianDominant => "Phrygian Dominant",
             Scale::MajorPentatonic => "Major Pentatonic",
             Scale::MinorPentatonic => "Minor Pentatonic",
+            Scale::Blues => "Blues",
+            Scale::WholeTone => "Whole Tone",
             Scale::Chromatic => "Chromatic",
         }
     }
@@ -394,33 +459,48 @@ pub fn toggle_override(added: u32, removed: u32, step: usize, is_hit: bool) -> (
     }
 }
 
-#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VelocityMode {
-    #[name = "Off"]
-    Off,
-    #[name = "Up"]
-    Up,
-    #[name = "Down"]
-    Down,
-}
-
 /// Velocity for the `note_index`-th note counted from the start of the song
-/// (it keeps counting across sequence loops, so a ramp longer than the
-/// pattern drifts against it instead of restarting every loop).
+/// (it keeps counting across sequence loops, so a ramp longer or shorter than
+/// the pattern drifts against it instead of restarting every loop).
 ///
-/// The ramp runs from `low` to `high` (Up) or `high` to `low` (Down) over
-/// `length` notes, then starts again. A length of 1 (or mode Off) gives the
+/// Same shapes as the pitch ramp, between `low` and `high`, repeating every
+/// `length` notes: Up / Down sweep, Up-Down / Down-Up go there and back,
+/// Climb / Descend step +1 +1 -1 through `length` levels, Random picks a fixed
+/// level per note of the cycle from `seed`. A length of 1 (or Off) gives the
 /// fixed `base`.
-pub fn ramp_velocity(base: i32, mode: VelocityMode, low: i32, high: i32, length: usize, note_index: i64) -> i32 {
-    if mode == VelocityMode::Off || length <= 1 {
+pub fn ramp_velocity(
+    base: i32,
+    mode: RampMode,
+    low: i32,
+    high: i32,
+    length: usize,
+    note_index: i64,
+    seed: u32,
+) -> i32 {
+    if mode == RampMode::Off || length <= 1 {
         return base;
     }
-    let t = note_index.rem_euclid(length as i64) as f64 / (length - 1) as f64;
-    let (from, to) = match mode {
-        VelocityMode::Up => (low, high),
-        _ => (high, low),
+    let n = length as i64;
+    let pos = note_index.rem_euclid(n) as f64;
+    let last = (n - 1) as f64;
+    let tri = 1.0 - (2.0 * pos / last - 1.0).abs();
+    // Climb level: periodic over 3n notes, so negative (pre-roll) indices work.
+    let k = note_index.rem_euclid(3 * n);
+    let climb = ((k / 3 + k % 3) % n) as f64 / last;
+    let t = match mode {
+        RampMode::Off => 0.0,
+        RampMode::Up => pos / last,
+        RampMode::Down => 1.0 - pos / last,
+        RampMode::UpDown => tri,
+        RampMode::DownUp => 1.0 - tri,
+        RampMode::Climb => climb,
+        RampMode::Descend => 1.0 - climb,
+        RampMode::Random => {
+            let r = splitmix64(((seed as u64) << 32) | pos as u64 | 0x8000_0000);
+            (r % 1001) as f64 / 1000.0
+        }
     };
-    from + (t * (to - from) as f64).round() as i32
+    low + (t * (high - low) as f64).round() as i32
 }
 
 /// Playback direction of a track.
@@ -798,17 +878,55 @@ mod tests {
 
     #[test]
     fn velocity_ramp() {
-        let v = |mode, len, i| ramp_velocity(75, mode, 40, 100, len, i);
-        let up: Vec<_> = (0..8).map(|i| v(VelocityMode::Up, 4, i)).collect();
+        let v = |mode, len, i| ramp_velocity(75, mode, 40, 100, len, i, 1);
+        let up: Vec<_> = (0..8).map(|i| v(RampMode::Up, 4, i)).collect();
         assert_eq!(up, vec![40, 60, 80, 100, 40, 60, 80, 100]);
-        let down: Vec<_> = (0..4).map(|i| v(VelocityMode::Down, 4, i)).collect();
+        let down: Vec<_> = (0..4).map(|i| v(RampMode::Down, 4, i)).collect();
         assert_eq!(down, vec![100, 80, 60, 40]);
         // Length 2 alternates between the two values.
-        let alt: Vec<_> = (0..4).map(|i| v(VelocityMode::Up, 2, i)).collect();
+        let alt: Vec<_> = (0..4).map(|i| v(RampMode::Up, 2, i)).collect();
         assert_eq!(alt, vec![40, 100, 40, 100]);
         // Length 1 or Off: fixed at the base velocity.
-        assert_eq!(v(VelocityMode::Up, 1, 3), 75);
-        assert_eq!(v(VelocityMode::Off, 4, 3), 75);
+        assert_eq!(v(RampMode::Up, 1, 3), 75);
+        assert_eq!(v(RampMode::Off, 4, 3), 75);
+    }
+
+    #[test]
+    fn velocity_ramp_shapes() {
+        let v = |mode, len, i| ramp_velocity(75, mode, 40, 100, len, i, 1);
+        let up_down: Vec<_> = (0..5).map(|i| v(RampMode::UpDown, 5, i)).collect();
+        assert_eq!(up_down, vec![40, 70, 100, 70, 40]);
+        let down_up: Vec<_> = (0..5).map(|i| v(RampMode::DownUp, 5, i)).collect();
+        assert_eq!(down_up, vec![100, 70, 40, 70, 100]);
+        // Climb through 4 levels (40, 60, 80, 100): up, up, down …
+        let climb: Vec<_> = (0..9).map(|i| v(RampMode::Climb, 4, i)).collect();
+        assert_eq!(climb, vec![40, 60, 80, 60, 80, 100, 80, 100, 40]);
+        let descend: Vec<_> = (0..3).map(|i| v(RampMode::Descend, 4, i)).collect();
+        assert_eq!(descend, vec![100, 80, 60]);
+        // Random: in range, repeats every `length` notes, re-rolls with the seed.
+        let r = |seed, i| ramp_velocity(75, RampMode::Random, 40, 100, 6, i, seed);
+        let a: Vec<_> = (0..12).map(|i| r(1, i)).collect();
+        assert!(a.iter().all(|&x| (40..=100).contains(&x)));
+        assert_eq!(a[..6], a[6..]);
+        assert_ne!(a, (0..12).map(|i| r(2, i)).collect::<Vec<_>>());
+        // Pre-roll (negative indices) stays in range for every shape.
+        for mode in [RampMode::Climb, RampMode::Descend, RampMode::UpDown, RampMode::Random] {
+            assert!((-20..0).all(|i| (40..=100).contains(&v(mode, 5, i))));
+        }
+    }
+
+    #[test]
+    fn new_scales() {
+        assert_eq!(Scale::ALL.len(), 15);
+        assert_eq!(scale_note(60, 1, Scale::Phrygian), 61); // flat 2nd
+        assert_eq!(scale_note(60, 3, Scale::Lydian), 66); // sharp 4th
+        assert_eq!(scale_note(60, 4, Scale::Locrian), 66); // flat 5th
+        assert_eq!(scale_note(60, 3, Scale::Blues), 66); // blue note
+        assert_eq!(scale_note(60, 6, Scale::WholeTone), 72);
+        let ids = Scale::ids().expect("scales have stable ids");
+        for legacy in SCALE_LEGACY_ORDER {
+            assert!(ids.contains(&legacy), "{legacy}");
+        }
     }
 
     #[test]
@@ -819,7 +937,7 @@ mod tests {
         let p = pattern(8, 8, 3, 0);
         let vels: Vec<_> = (0..24i64)
             .filter(|&k| p[k.rem_euclid(8) as usize])
-            .map(|k| ramp_velocity(75, VelocityMode::Up, 40, 100, 7, song_note_index(k, 8, Direction::Forward, &p)))
+            .map(|k| ramp_velocity(75, RampMode::Up, 40, 100, 7, song_note_index(k, 8, Direction::Forward, &p), 1))
             .collect();
         assert_eq!(vels, vec![40, 50, 60, 70, 80, 90, 100, 40, 50]);
         // Notes before the song start (pre-roll) count backwards consistently.

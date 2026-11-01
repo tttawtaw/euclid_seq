@@ -10,7 +10,7 @@ pub mod sequencer;
 use sequencer::{
     apply_overrides, gate_beats, note_name, parse_note_name, passes_probability, pattern, play_pos,
     ramp_velocity, scale_note, song_note_index, Direction, GateUnit, Ramp, RampMode,
-    RampRange, Rate, Scale, VelocityMode, MAX_STEPS,
+    RampRange, Rate, Scale, MAX_STEPS,
 };
 
 pub const NUM_TRACKS: usize = 4;
@@ -192,8 +192,14 @@ pub struct TrackParams {
     #[id = "velocity"]
     pub velocity: IntParam,
 
+    /// Same shapes as the pitch ramp. (Saved values from the old
+    /// Off/Up/Down list load unchanged: they keep their positions.)
     #[id = "vel_mode"]
-    pub vel_mode: EnumParam<VelocityMode>,
+    pub vel_mode: EnumParam<RampMode>,
+
+    /// Selects which random velocities the Random mode plays.
+    #[id = "vel_seed"]
+    pub vel_seed: IntParam,
 
     #[id = "vel_low"]
     pub vel_low: IntParam,
@@ -303,7 +309,8 @@ impl TrackParams {
             ramp_seed: IntParam::new(name("Ramp Seed"), 1, IntRange::Linear { min: 0, max: 9999 })
                 .non_automatable(),
             velocity: IntParam::new(name("Velocity"), 75, IntRange::Linear { min: 0, max: 127 }),
-            vel_mode: EnumParam::new(name("Velocity Ramp"), VelocityMode::Off),
+            vel_mode: EnumParam::new(name("Velocity Ramp"), RampMode::Off),
+            vel_seed: IntParam::new(name("Velocity Seed"), 1, IntRange::Linear { min: 0, max: 9999 }).non_automatable(),
             vel_low: IntParam::new(name("Velocity Low"), 40, IntRange::Linear { min: 0, max: 127 }),
             vel_high: IntParam::new(name("Velocity High"), 110, IntRange::Linear { min: 0, max: 127 }),
             vel_length: IntParam::new(name("Velocity Length"), 4, IntRange::Linear { min: 1, max: 16 }),
@@ -361,6 +368,7 @@ impl TrackParams {
             self.vel_high.value(),
             self.vel_length.value() as usize,
             song_note_index(global_step, len, self.direction.value(), pattern),
+            self.vel_seed.value() as u32,
         )
     }
 
@@ -523,6 +531,7 @@ impl Plugin for EuclidSeq {
     /// Migrate projects saved by older versions.
     fn filter_state(state: &mut PluginState) {
         migrate_ramp_modes(state);
+        migrate_scales(state);
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
@@ -670,6 +679,22 @@ fn migrate_ramp_modes(state: &mut PluginState) {
     }
 }
 
+/// Before v0.9 scales were saved by position. The list has since grown and
+/// been reordered with stable ids, so translate old positions to ids.
+fn migrate_scales(state: &mut PluginState) {
+    use nih_plug::wrapper::state::ParamValue;
+    let keys = (1..=NUM_TRACKS).map(|t| format!("scale_{t}")).chain(std::iter::once("g_scale".to_string()));
+    for key in keys {
+        if let Some(value) = state.params.get_mut(&key) {
+            if let ParamValue::I32(index) = *value {
+                if let Some(id) = sequencer::SCALE_LEGACY_ORDER.get(index as usize) {
+                    *value = ParamValue::String((*id).to_string());
+                }
+            }
+        }
+    }
+}
+
 impl ClapPlugin for EuclidSeq {
     const CLAP_ID: &'static str = "com.thomasverney.euclid-seq";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("4-track euclidean MIDI step sequencer");
@@ -708,6 +733,23 @@ mod tests {
         assert_eq!(get("ramp_2"), "climb");
         assert_eq!(get("ramp_3"), "updown");
         assert_eq!(get("pitch_1"), "3");
+    }
+
+    #[test]
+    fn old_scales_migrate_by_name() {
+        let mut params = BTreeMap::new();
+        params.insert("scale_1".to_string(), ParamValue::I32(1)); // old "Minor"
+        params.insert("scale_2".to_string(), ParamValue::I32(7)); // old "Chromatic"
+        params.insert("g_scale".to_string(), ParamValue::I32(2)); // old "Dorian"
+        let mut state = PluginState { version: "0.8.0".into(), params, fields: BTreeMap::new() };
+        migrate_scales(&mut state);
+        let id = |k: &str| match &state.params[k] {
+            ParamValue::String(s) => s.clone(),
+            _ => panic!("{k} not migrated"),
+        };
+        assert_eq!(id("scale_1"), "minor");
+        assert_eq!(id("scale_2"), "chromatic");
+        assert_eq!(id("g_scale"), "dorian");
     }
 }
 
