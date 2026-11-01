@@ -7,7 +7,8 @@ mod editor;
 pub mod sequencer;
 
 use sequencer::{
-    apply_overrides, note_name, parse_note_name, pattern, ramp_velocity, scale_note, song_note_index, Ramp, RampMode,
+    apply_overrides, gate_beats, note_name, parse_note_name, passes_probability, pattern, play_pos,
+    ramp_velocity, scale_note, song_note_index, Direction, GateUnit, Ramp, RampMode,
     RampRange, Rate, Scale, VelocityMode, MAX_STEPS,
 };
 
@@ -17,11 +18,16 @@ pub const STOPPED: i64 = i64::MIN;
 /// Room for every note on/off of all tracks in one block, even at 1/64.
 const MAX_EVENTS: usize = 1024;
 
+/// How many notes one track can hold at once (gates longer than a step
+/// overlap). Past this, the oldest note is released.
+const MAX_HELD: usize = 32;
+
 /// A note a track is holding: what was sent, and when it must stop.
 #[derive(Clone, Copy)]
 struct Held {
     note: u8,
     channel: u8,
+    on_beat: f64,
     off_beat: f64,
 }
 
@@ -42,9 +48,9 @@ pub struct EuclidSeq {
     /// Global step under the playhead for each track (steps since beat 0, so
     /// the GUI can tell which loop it is in), or STOPPED.
     playheads: Arc<[AtomicI64; NUM_TRACKS]>,
-    /// The note each track is holding, so it is always released with exactly
-    /// what was sent, even if pitch, channel or rate changed meanwhile.
-    held: [Option<Held>; NUM_TRACKS],
+    /// Notes each track is holding, so they are always released with exactly
+    /// what was sent, even if pitch, channel, rate or gate changed meanwhile.
+    held: [[Option<Held>; MAX_HELD]; NUM_TRACKS],
     /// Where the previous block ended, to detect loops and jumps.
     last_end_beat: Option<f64>,
     /// Pre-allocated event buffer (never grows on the audio thread).
@@ -104,6 +110,26 @@ pub struct TrackParams {
     /// Dotted steps last 1.5x as long.
     #[id = "dotted"]
     pub dotted: BoolParam,
+
+    /// Forward, Reverse or Ping-Pong.
+    #[id = "direction"]
+    pub direction: EnumParam<Direction>,
+
+    /// Whether the gate is a % of the step or a time in ms.
+    #[id = "gate_unit"]
+    pub gate_unit: EnumParam<GateUnit>,
+
+    /// Gate as a percentage of the step length (0-200 %).
+    #[id = "gate_pct"]
+    pub gate_pct: IntParam,
+
+    /// Gate as a fixed time (10 ms - 20 s).
+    #[id = "gate_ms"]
+    pub gate_ms: FloatParam,
+
+    /// Chance that each note plays (0-100 %).
+    #[id = "probability"]
+    pub probability: IntParam,
 
     /// Shifts the euclidean pattern right (+) or left (-) within its cycle.
     #[id = "rotate"]
@@ -186,6 +212,35 @@ impl TrackParams {
             ),
             rate: EnumParam::new(name("Rate"), Rate::N16),
             dotted: BoolParam::new(name("Dotted"), false),
+            direction: EnumParam::new(name("Direction"), Direction::Forward),
+            gate_unit: EnumParam::new(name("Gate Unit"), GateUnit::Percent),
+            gate_pct: IntParam::new(name("Gate %"), 50, IntRange::Linear { min: 0, max: 200 }).with_unit("%"),
+            gate_ms: FloatParam::new(
+                name("Gate ms"),
+                250.0,
+                FloatRange::Skewed { min: 10.0, max: 20_000.0, factor: FloatRange::skew_factor(-2.5) },
+            )
+            .with_value_to_string(Arc::new(|v| {
+                // Decide the unit on the rounded value, so text converts back
+                // to the same text (999.6 shows as "1.00 s", not "1000 ms").
+                let r = v.round();
+                if r < 1000.0 {
+                    format!("{r:.0} ms")
+                } else {
+                    format!("{:.2} s", v / 1000.0)
+                }
+            }))
+            .with_string_to_value(Arc::new(|s| {
+                let s = s.trim().to_ascii_lowercase();
+                if let Some(ms) = s.strip_suffix("ms") {
+                    ms.trim().parse().ok()
+                } else if let Some(sec) = s.strip_suffix('s') {
+                    sec.trim().parse::<f32>().ok().map(|v| v * 1000.0)
+                } else {
+                    s.parse().ok()
+                }
+            })),
+            probability: IntParam::new(name("Probability"), 100, IntRange::Linear { min: 0, max: 100 }).with_unit("%"),
             rotate: IntParam::new(name("Rotate"), 0, IntRange::Linear { min: -16, max: 16 })
                 .with_value_to_string(Arc::new(|v| format!("{v:+}"))),
             pitch: IntParam::new(name("Pitch"), 0, IntRange::Linear { min: -14, max: 14 })
@@ -262,7 +317,7 @@ impl TrackParams {
             self.vel_low.value(),
             self.vel_high.value(),
             self.vel_length.value() as usize,
-            song_note_index(global_step, len, pattern),
+            song_note_index(global_step, len, self.direction.value(), pattern),
         )
     }
 
@@ -280,15 +335,18 @@ impl TrackParams {
         }
     }
 
-    /// Scale degree (relative to the root) played on `step` of `pattern`.
-    pub fn step_degree(&self, step: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
+    /// Scale degree (relative to the root) of grid cell `cell`. Pitch belongs
+    /// to the cell, not to the moment it plays: playback direction only moves
+    /// the playhead, so the grid always shows what will sound. Climb/Descend
+    /// number the notes in grid order.
+    pub fn step_degree(&self, cell: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
         let len = self.length.value() as usize;
-        let note_index = pattern[..step.min(len)].iter().filter(|&&h| h).count();
-        self.pitch.value() + self.ramp().degree(step, note_index, len, self.scale.value())
+        let note_index = pattern[..cell.min(len)].iter().filter(|&&h| h).count();
+        self.pitch.value() + self.ramp().degree(cell, note_index, len, self.scale.value())
     }
 
-    pub fn step_note(&self, step: usize, pattern: &[bool; MAX_STEPS]) -> u8 {
-        scale_note(self.root.value(), self.step_degree(step, pattern), self.scale.value())
+    pub fn step_note(&self, cell: usize, pattern: &[bool; MAX_STEPS]) -> u8 {
+        scale_note(self.root.value(), self.step_degree(cell, pattern), self.scale.value())
     }
 
     pub fn step_beats(&self) -> f64 {
@@ -325,7 +383,7 @@ impl Default for EuclidSeq {
         Self {
             params: Arc::new(EuclidSeqParams::default()),
             playheads: Arc::new(std::array::from_fn(|_| AtomicI64::new(STOPPED))),
-            held: [None; NUM_TRACKS],
+            held: [[None; MAX_HELD]; NUM_TRACKS],
             last_end_beat: None,
             events: Vec::with_capacity(MAX_EVENTS),
         }
@@ -341,8 +399,8 @@ impl EuclidSeq {
     }
 
     fn release_all_now(&mut self, context: &mut impl ProcessContext<Self>) {
-        for t in 0..NUM_TRACKS {
-            if let Some(h) = self.held[t].take() {
+        for slot in self.held.iter_mut().flatten() {
+            if let Some(h) = slot.take() {
                 context.send_event(NoteEvent::NoteOff {
                     timing: 0,
                     voice_id: None,
@@ -350,6 +408,23 @@ impl EuclidSeq {
                     note: h.note,
                     velocity: 0.0,
                 });
+            }
+        }
+    }
+
+    /// Queue note-offs for every note of `track` matching `due`, at `at(note)`.
+    fn release_where(
+        &mut self,
+        track: usize,
+        due: impl Fn(&Held) -> bool,
+        at: impl Fn(&Held) -> u32,
+    ) {
+        for i in 0..MAX_HELD {
+            if let Some(h) = self.held[track][i] {
+                if due(&h) {
+                    self.held[track][i] = None;
+                    self.push(at(&h), false, h.note, h.channel, 0.0);
+                }
             }
         }
     }
@@ -381,7 +456,7 @@ impl Plugin for EuclidSeq {
 
     fn reset(&mut self) {
         // The host will have flushed notes; just forget ours.
-        self.held = [None; NUM_TRACKS];
+        self.held = [[None; MAX_HELD]; NUM_TRACKS];
         self.last_end_beat = None;
         for p in self.playheads.iter() {
             p.store(STOPPED, Ordering::Relaxed);
@@ -427,36 +502,64 @@ impl Plugin for EuclidSeq {
 
         for (t, track) in params.tracks.iter().enumerate() {
             let step_beats = track.step_beats();
-            let gate = step_beats * 0.5;
-            let length = track.length.value() as i64;
+            let gate = gate_beats(
+                track.gate_unit.value(),
+                track.gate_pct.value(),
+                track.gate_ms.value(),
+                step_beats,
+                tempo,
+            );
+            let len = track.length.value() as usize;
+            let dir = track.direction.value();
             let pattern = track.current_pattern();
             let on = track.on.value();
+            let probability = track.probability.value();
+
+            // Track switched off: let go of everything right away.
+            if !on {
+                self.release_where(t, |_| true, |_| 0);
+            }
 
             for (k, beat) in sequencer::block_steps(start_beat, beats_per_sample, num_samples, step_beats) {
-                // Close the previous note at its gate end, or right here at the
-                // latest (e.g. when the rate just got faster).
-                if let Some(h) = self.held[t].take() {
-                    self.push(timing(h.off_beat.min(beat)), false, h.note, h.channel, 0.0);
+                // Notes whose gate has ended by this step.
+                self.release_where(t, |h| h.off_beat <= beat, |h| timing(h.off_beat));
+                if !on {
+                    continue;
                 }
-                let step = k.rem_euclid(length) as usize;
-                if on && pattern[step] {
-                    let note = track.step_note(step, &pattern);
-                    let velocity = track.step_velocity(k, &pattern) as f32 / 127.0;
-                    let channel = (track.channel.value() - 1) as u8;
-                    self.push(timing(beat), true, note, channel, velocity);
-                    self.held[t] = Some(Held { note, channel, off_beat: beat + gate });
+                let cell = play_pos(k, len, dir).position;
+                if !pattern[cell] || !passes_probability(probability, t, k) {
+                    continue;
                 }
+                let note = track.step_note(cell, &pattern);
+                let velocity = track.step_velocity(k, &pattern) as f32 / 127.0;
+                let channel = (track.channel.value() - 1) as u8;
+
+                // The same pitch still ringing (long gates): end it right
+                // before retriggering, or most synths would cut the new note.
+                self.release_where(t, |h| h.note == note && h.channel == channel, |_| timing(beat));
+                // All slots busy: drop the oldest note.
+                let slot = match self.held[t].iter().position(Option::is_none) {
+                    Some(free) => free,
+                    None => {
+                        let oldest = (0..MAX_HELD)
+                            .min_by(|&a, &b| {
+                                let (a, b) = (self.held[t][a].unwrap(), self.held[t][b].unwrap());
+                                a.on_beat.total_cmp(&b.on_beat)
+                            })
+                            .unwrap_or(0);
+                        let h = self.held[t][oldest].take().unwrap();
+                        self.push(timing(beat), false, h.note, h.channel, 0.0);
+                        oldest
+                    }
+                };
+                self.push(timing(beat), true, note, channel, velocity);
+                self.held[t][slot] = Some(Held { note, channel, on_beat: beat, off_beat: beat + gate });
             }
 
-            // Gate ends inside this block with no new step after it.
-            if let Some(h) = self.held[t] {
-                if h.off_beat < end_beat || !on {
-                    self.held[t] = None;
-                    self.push(timing(h.off_beat), false, h.note, h.channel, 0.0);
-                }
-            }
+            // Gates ending inside this block after the last step.
+            self.release_where(t, |h| h.off_beat < end_beat, |h| timing(h.off_beat));
 
-            // Playhead for the GUI: the step sounding at the end of this block.
+            // Playhead for the GUI: global step sounding at the end of this block.
             let last = ((end_beat - beats_per_sample) / step_beats).floor() as i64;
             self.playheads[t].store(last, Ordering::Relaxed);
         }

@@ -9,7 +9,7 @@ A minimal 4-track euclidean MIDI step sequencer, built in Rust with [nih-plug](h
 Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab's dot lights up when its track fires a note, and dims when the track is off. Every control below is per track, except the **Global** panel.
 
 The controls sit in three panels:
-- **Rhythm + Velocity:** when notes play and how hard.
+- **Rhythm + Timing + Velocity:** when notes play, for how long, and how hard.
 - **Pitch + Pitch Ramp:** which notes.
 - **Global:** settings shared by all tracks.
 
@@ -29,8 +29,18 @@ The controls sit in three panels:
 | E. Steps | 1–32 | Length of the euclidean cycle. It repeats inside the sequence and restarts when the sequence wraps. |
 | Pulses | 0–32 | Hits spread evenly over the euclidean cycle (Bjorklund's algorithm, clamped to E. Steps). |
 | Rotate | −16…+16 | Shifts the hits right (+) or left (−), wrapping inside the euclidean cycle. |
+| Prob | 0–100 % | Chance that each note plays. Every pass rolls again, but the same spot in the song always gives the same result, so playback and exports are repeatable. |
+
+**Timing**
+
+| Control | Range | What it does |
+|---|---|---|
 | Rate | 1/64 … 1/1, x2, x4 | How long each step lasts. 1/16 is the default; x2 and x4 mean one step every 2 or 4 bars. |
 | Dot | on / off | Dotted rate: each step lasts 1.5× as long (shown as e.g. `1/8.`). |
+| Direction | FWD / REV / P-P | Forward, Reverse, or Ping-Pong (1 2 3 4 3 2 1 2 …, the end steps aren't repeated). Only the playhead moves differently: each step keeps the pitch shown on it. |
+| Gate | 0–200 % or 10 ms–20 s | How long each note lasts, set with the **% / ms** switch. In % it's a share of the step (50 % = half a step; over 100 % notes overlap). In ms it's a fixed time whatever the tempo. 0 % plays a 1 ms blip rather than nothing. |
+
+Long gates let notes overlap, up to 32 per track; past that, the oldest is released. If a note repeats a pitch that's still ringing, the old one ends just before the new one starts, so the synth doesn't choke it.
 
 **Pitch**
 
@@ -60,7 +70,7 @@ Up, Down and Random are tied to step positions, not to hits. So Rotate, Pulses a
 | Low / High | 0–127 | The two values the ramp moves between. |
 | Length | 1–16 | Notes per ramp before it starts again. 2 alternates Low/High; 1 = fixed Velocity. Not tied to the pattern: it can be longer than the number of notes. |
 
-The velocity ramp counts *notes*, not steps, and keeps counting across sequence loops. When Length differs from the number of notes in the pattern, the velocities drift against the rhythm and only line up again after several loops. That's deliberate, and it keeps a repeating pattern moving. It's worked out from the song position, so the same spot in your song always gets the same velocities. Each hit shows its velocity for the loop currently playing as a bar along the bottom of its cell.
+The velocity ramp counts *notes* in the order they're played (so Reverse and Ping-Pong are taken into account), not steps, and keeps counting across sequence loops. When Length differs from the number of notes in the pattern, the velocities drift against the rhythm and only line up again after several loops. That's deliberate, and it keeps a repeating pattern moving. It's worked out from the song position, so the same spot in your song always gets the same velocities. Each hit shows its velocity for the loop currently playing as a bar along the bottom of its cell.
 
 **Editing steps by hand**
 
@@ -78,6 +88,11 @@ The velocity ramp counts *notes*, not steps, and keeps counting across sequence 
 | Scale | Changing it sets every track to that scale. |
 | Following | Lit for each track that still matches the global key and scale. |
 
+| CLEAR ALL | Removes every note from all 4 tracks. |
+| RESET ALL | Returns the whole plugin to its factory settings: every track (including ON switches and MIDI channels), the global key and scale, and all hand-placed notes. |
+
+CLEAR ALL and RESET ALL ask for a second click ("SURE?") within 3 seconds, because hand-placed notes can't be brought back with your DAW's undo.
+
 The global controls pass their value to all tracks when you change them. After that, changing a track's own Root or Scale only affects that track. They aren't automatable, because that hand-off happens in the plugin window.
 
 **Knobs**
@@ -85,7 +100,7 @@ The global controls pass their value to all tracks when you change them. After t
 - Drag vertically (Shift = fine), scroll for single steps, double‑click to reset.
 - **Cmd+click** (or Ctrl+click) any numeric knob to type a value: Enter confirms, Esc cancels. Root accepts note names like `F#2`.
 
-Timing: each track runs at its own Rate, locked to the host transport (sample‑accurate), with a 50 % gate. Patterns are anchored to the song position, so they stay in sync when you jump around or loop.
+Timing: each track runs at its own Rate and Gate, locked to the host transport (sample‑accurate). Patterns are anchored to the song position, so they stay in sync when you jump around or loop.
 
 Grid: orange = hit, white = hit under the playhead, small dot = start of each euclidean cycle, dim cells = beyond the sequence length.
 
@@ -113,7 +128,7 @@ GUI without a DAW (dev only):
 cargo run --release --features standalone -- --backend dummy --tempo 120
 ```
 
-Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, pitch and velocity ramps (incl. Climb/Descend), manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
+Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend), manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
 
 ```sh
 cargo test --lib
@@ -129,7 +144,7 @@ cargo test --lib
 
 - `src/sequencer.rs` – pure logic: Bjorklund, rotation, scales, ramps, note names, block tick timing (unit tested, allocation‑free)
 - `src/lib.rs` – plugin, per-track parameters, MIDI output in `process()`
-- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), panels, knobs with type-in, link button, ramps, global section, Clear/Reset
+- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), panels, knobs with type-in, link button, ramps, global section, Clear/Reset (per track and all)
 
 ## Known notes
 

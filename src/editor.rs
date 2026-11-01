@@ -8,11 +8,14 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::sequencer::{note_name, toggle_override, Rate, RampMode, RampRange, Scale, MAX_STEPS};
+use crate::sequencer::{
+    cell_step_in_pass, note_name, play_pos, toggle_override, Direction, GateUnit, Rate, RampMode, RampRange, Scale,
+    MAX_STEPS,
+};
 use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS, STOPPED};
 
 const WIDTH: u32 = 950;
-const HEIGHT: u32 = 500;
+const HEIGHT: u32 = 630;
 
 const BG: Color32 = Color32::from_rgb(0x17, 0x17, 0x19);
 const PANEL: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
@@ -32,13 +35,14 @@ const DIAL_Y: f32 = 34.0;
 
 type Playheads = Arc<[AtomicI64; NUM_TRACKS]>;
 
-/// (step within the sequence, loop number) for a track, or (-1, 0) when stopped.
+/// (grid cell under the playhead, pass number) for a track, following its
+/// playback direction, or (-1, 0) when stopped.
 fn split_playhead(track: &TrackParams, global: i64) -> (i32, i64) {
     if global == STOPPED {
         return (-1, 0);
     }
-    let len = track.length.value() as i64;
-    (global.rem_euclid(len) as i32, global.div_euclid(len))
+    let pos = play_pos(global, track.length.value() as usize, track.direction.value());
+    (pos.position as i32, pos.pass)
 }
 
 pub fn default_state() -> Arc<EguiState> {
@@ -238,7 +242,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
 
         // Velocity: a bar along the bottom of each hit, as wide as it is loud.
         if hit {
-            let vel = track.step_velocity(loop_idx * length as i64 + i as i64, &pattern) as f32 / 127.0;
+            let vel = track.step_velocity(cell_step_in_pass(loop_idx, i, length, track.direction.value()), &pattern) as f32 / 127.0;
             let w = (cell - 10.0) * vel;
             let bar = Rect::from_min_size(pos2(rect.left() + 5.0, rect.bottom() - 6.0), vec2(w.max(1.0), 2.5));
             painter.rect_filled(bar, CornerRadius::ZERO, BG);
@@ -279,7 +283,11 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
         let hover = if active {
             let note = note_name(track.step_note(i, &pattern) as i32);
             let what = if hit {
-                format!("{} · velocity {}", note, track.step_velocity(loop_idx * length as i64 + i as i64, &pattern))
+                format!(
+                    "{} · velocity {}",
+                    note,
+                    track.step_velocity(cell_step_in_pass(loop_idx, i, length, track.direction.value()), &pattern)
+                )
             } else {
                 format!("{} (rest)", note)
             };
@@ -316,7 +324,7 @@ fn group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 /// Inner height shared by the three panels so their edges line up.
-const PANEL_INNER_H: f32 = 2.0 * (18.0 + KNOB_H) + 14.0;
+const PANEL_INNER_H: f32 = 3.0 * (18.0 + KNOB_H) + 2.0 * 14.0;
 
 /// A rounded panel that visually groups related sections.
 fn panel(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
@@ -368,6 +376,10 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
                 let pulses = KnobStyle { text: Some(track.effective_pulses().to_string()), ..KnobStyle::typeable() };
                 knob(ui, setter, &track.euclid_pulses, "PULSES", pulses);
                 knob(ui, setter, &track.rotate, "ROTATE", KnobStyle { bipolar: true, ..KnobStyle::typeable() });
+                knob(ui, setter, &track.probability, "PROB", KnobStyle::typeable());
+            });
+            ui.add_space(14.0);
+            group(ui, "TIMING", |ui| {
                 let rate_text = format!("{}{}", track.rate, if track.dotted.value() { "." } else { "" });
                 let rate = KnobStyle { stepped: Some(Rate::variants().len()), text: Some(rate_text), ..Default::default() };
                 knob(ui, setter, &track.rate, "RATE", rate);
@@ -376,6 +388,32 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
                     pill_toggle(ui, setter, &track.dotted, "DOT", "DOT", "Dotted: each step lasts 1.5x as long");
                     ui.add_space(28.0);
                     ui.label(egui::RichText::new("DOTTED").color(TEXT_DIM).size(10.5));
+                });
+                ui.vertical(|ui| {
+                    ui.add_space(DIAL_Y - 12.0);
+                    let dirs = [
+                        (Direction::Forward, "FWD".to_string()),
+                        (Direction::Reverse, "REV".to_string()),
+                        (Direction::PingPong, "P-P".to_string()),
+                    ];
+                    segmented(ui, setter, &track.direction, &dirs, 38.0);
+                    ui.add_space(24.0);
+                    ui.label(egui::RichText::new("DIRECTION").color(TEXT_DIM).size(10.5));
+                });
+                // One GATE knob, showing whichever unit is selected.
+                match track.gate_unit.value() {
+                    GateUnit::Percent => {
+                        knob(ui, setter, &track.gate_pct, "GATE", KnobStyle::typeable());
+                    }
+                    GateUnit::Ms => {
+                        knob(ui, setter, &track.gate_ms, "GATE", KnobStyle::typeable());
+                    }
+                }
+                ui.vertical(|ui| {
+                    ui.add_space(DIAL_Y - 12.0);
+                    segmented(ui, setter, &track.gate_unit, &[(GateUnit::Percent, "%".into()), (GateUnit::Ms, "ms".into())], 32.0);
+                    ui.add_space(24.0);
+                    ui.label(egui::RichText::new("UNIT").color(TEXT_DIM).size(10.5));
                 });
             });
             ui.add_space(14.0);
@@ -488,6 +526,68 @@ fn global_section(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter) {
             });
         }
     });
+
+    // Whole-plugin actions, each needing a second click to confirm.
+    ui.add_space(18.0);
+    if confirm_button(ui, "clear_all", "CLEAR ALL", "Remove every note from all 4 tracks") {
+        for track in params.tracks.iter() {
+            clear_track(setter, track);
+        }
+    }
+    ui.add_space(4.0);
+    if confirm_button(ui, "reset_all", "RESET ALL", "Return the whole plugin to its factory settings\n(all tracks, ON switches, MIDI channels, global key and scale)") {
+        reset_all(setter, params);
+    }
+}
+
+/// Every parameter of the plugin back to its default and all manual edits
+/// cleared: the plugin as it was when first loaded.
+fn reset_all(setter: &ParamSetter, params: &EuclidSeqParams) {
+    for (_, ptr, _) in params.param_map() {
+        // SAFETY: pointers from the plugin's own param map, valid while it lives.
+        unsafe {
+            let ctx = setter.raw_context;
+            ctx.raw_begin_set_parameter(ptr);
+            ctx.raw_set_parameter_normalized(ptr, ptr.default_normalized_value());
+            ctx.raw_end_set_parameter(ptr);
+        }
+    }
+    for track in params.tracks.iter() {
+        track.added.store(0, Ordering::Relaxed);
+        track.removed.store(0, Ordering::Relaxed);
+    }
+}
+
+/// A button for destructive actions: the first click arms it ("SURE?") for
+/// three seconds, a second click runs the action. Returns true on confirm.
+fn confirm_button(ui: &mut Ui, key: &str, label: &str, hint: &str) -> bool {
+    let id = Id::new(("confirm", key));
+    let now = ui.input(|i| i.time);
+    let armed = ui.memory(|m| m.data.get_temp::<f64>(id)).is_some_and(|until| now < until);
+
+    let (rect, resp) = ui.allocate_exact_size(vec2(112.0, 26.0), Sense::click());
+    let p = ui.painter();
+    let (fill, color, text) = if armed {
+        (ACCENT, BG, "SURE?")
+    } else if resp.hovered() {
+        (CELL_OFF, ACCENT, label)
+    } else {
+        (PANEL, TEXT, label)
+    };
+    p.rect_filled(rect, CornerRadius::same(5), fill);
+    p.text(rect.center(), Align2::CENTER_CENTER, text, FontId::monospace(11.5), color);
+
+    let mut confirmed = false;
+    if resp.clicked() {
+        if armed {
+            confirmed = true;
+            ui.memory_mut(|m| m.data.remove::<f64>(id));
+        } else {
+            ui.memory_mut(|m| m.data.insert_temp(id, now + 3.0));
+        }
+    }
+    resp.on_hover_text(format!("{hint}\nClick twice to confirm"));
+    confirmed
 }
 
 /// Empties the track: no euclidean pulses, no manually added notes.

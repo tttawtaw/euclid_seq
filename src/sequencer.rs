@@ -365,14 +365,115 @@ pub fn ramp_velocity(base: i32, mode: VelocityMode, low: i32, high: i32, length:
     from + (t * (to - from) as f64).round() as i32
 }
 
-/// How many notes have played since the song start (beat 0) before global step
-/// `global_step`, for a sequence of `length` steps playing `pattern`.
-pub fn song_note_index(global_step: i64, length: usize, pattern: &[bool; MAX_STEPS]) -> i64 {
-    let len = length.clamp(1, MAX_STEPS);
-    let per_loop = pattern[..len].iter().filter(|&&h| h).count() as i64;
-    let loops = global_step.div_euclid(len as i64);
-    let step = global_step.rem_euclid(len as i64) as usize;
-    loops * per_loop + pattern[..step].iter().filter(|&&h| h).count() as i64
+/// Playback direction of a track.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    #[name = "Forward"]
+    Forward,
+    #[name = "Reverse"]
+    Reverse,
+    /// Forward then back, playing the end steps once each: 1 2 3 4 3 2 | 1 2 …
+    #[name = "Ping-Pong"]
+    PingPong,
+}
+
+impl Direction {
+    /// Number of steps in one full pass through a sequence of `len` steps.
+    pub fn period(self, len: usize) -> usize {
+        let len = len.clamp(1, MAX_STEPS);
+        match self {
+            Direction::PingPong if len > 1 => 2 * len - 2,
+            _ => len,
+        }
+    }
+
+    /// Grid position played at `offset` (0..period) within a pass.
+    pub fn position(self, offset: usize, len: usize) -> usize {
+        let len = len.clamp(1, MAX_STEPS);
+        match self {
+            Direction::Forward => offset,
+            Direction::Reverse => len - 1 - offset,
+            Direction::PingPong => {
+                if offset < len {
+                    offset
+                } else {
+                    2 * len - 2 - offset
+                }
+            }
+        }
+    }
+}
+
+/// Where a track is at a given global step (steps since beat 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayPos {
+    /// Grid cell being played.
+    pub position: usize,
+    /// Which pass through the sequence (can be negative during pre-roll).
+    pub pass: i64,
+    /// Steps since the start of this pass.
+    pub offset: usize,
+}
+
+pub fn play_pos(global_step: i64, len: usize, dir: Direction) -> PlayPos {
+    let period = dir.period(len) as i64;
+    let offset = global_step.rem_euclid(period) as usize;
+    PlayPos { position: dir.position(offset, len), pass: global_step.div_euclid(period), offset }
+}
+
+/// Notes played in a pass before `offset`, counted in playing order.
+pub fn notes_before(offset: usize, len: usize, dir: Direction, pattern: &[bool; MAX_STEPS]) -> usize {
+    (0..offset).filter(|&m| pattern[dir.position(m, len)]).count()
+}
+
+/// How many notes have played since the song start (beat 0) before
+/// `global_step`, in playing order. Keeps counting across passes, which is
+/// what lets the velocity ramp drift against the rhythm.
+pub fn song_note_index(global_step: i64, len: usize, dir: Direction, pattern: &[bool; MAX_STEPS]) -> i64 {
+    let pos = play_pos(global_step, len, dir);
+    let per_pass = notes_before(dir.period(len), len, dir, pattern) as i64;
+    pos.pass * per_pass + notes_before(pos.offset, len, dir, pattern) as i64
+}
+
+/// The global step at which grid cell `cell` is first played during `pass`.
+pub fn cell_step_in_pass(pass: i64, cell: usize, len: usize, dir: Direction) -> i64 {
+    let period = dir.period(len);
+    let offset = (0..period).find(|&m| dir.position(m, len) == cell).unwrap_or(0);
+    pass * period as i64 + offset as i64
+}
+
+/// Does the note at `global_step` of `track` pass its probability roll?
+/// Each pass rolls again, but the same song position always gives the same
+/// answer, so playback and bounces are repeatable.
+pub fn passes_probability(probability: i32, track: usize, global_step: i64) -> bool {
+    if probability >= 100 {
+        return true;
+    }
+    if probability <= 0 {
+        return false;
+    }
+    let r = splitmix64((global_step as u64) ^ ((track as u64 + 1) << 56) ^ 0x5EED_1234);
+    (r % 100) < probability as u64
+}
+
+/// Gate length unit.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateUnit {
+    #[name = "%"]
+    Percent,
+    #[name = "ms"]
+    Ms,
+}
+
+/// Note length in beats. Never shorter than 1 ms, because many synths ignore
+/// zero-length notes.
+pub fn gate_beats(unit: GateUnit, percent: i32, ms: f32, step_beats: f64, tempo: f64) -> f64 {
+    let beats_per_ms = tempo / 60.0 / 1000.0;
+    let g = match unit {
+        GateUnit::Percent => step_beats * percent as f64 / 100.0,
+        GateUnit::Ms => ms as f64 * beats_per_ms,
+    };
+    g.max(beats_per_ms)
 }
 
 /// Small, fast, well-mixed hash; deterministic across platforms.
@@ -611,12 +712,69 @@ mod tests {
         let p = pattern(8, 8, 3, 0);
         let vels: Vec<_> = (0..24i64)
             .filter(|&k| p[k.rem_euclid(8) as usize])
-            .map(|k| ramp_velocity(75, VelocityMode::Up, 40, 100, 7, song_note_index(k, 8, &p)))
+            .map(|k| ramp_velocity(75, VelocityMode::Up, 40, 100, 7, song_note_index(k, 8, Direction::Forward, &p)))
             .collect();
         assert_eq!(vels, vec![40, 50, 60, 70, 80, 90, 100, 40, 50]);
         // Notes before the song start (pre-roll) count backwards consistently.
-        assert_eq!(song_note_index(-8, 8, &p), -3);
-        assert_eq!(song_note_index(3, 8, &p), 1);
+        assert_eq!(song_note_index(-8, 8, Direction::Forward, &p), -3);
+        assert_eq!(song_note_index(3, 8, Direction::Forward, &p), 1);
+    }
+
+    #[test]
+    fn directions() {
+        let order = |dir: Direction, len: usize| -> Vec<usize> {
+            (0..dir.period(len) * 2).map(|k| play_pos(k as i64, len, dir).position).collect()
+        };
+        assert_eq!(order(Direction::Forward, 4), vec![0, 1, 2, 3, 0, 1, 2, 3]);
+        assert_eq!(order(Direction::Reverse, 4), vec![3, 2, 1, 0, 3, 2, 1, 0]);
+        // Ping-pong plays the ends once: 0 1 2 3 2 1 | 0 1 2 3 2 1
+        assert_eq!(order(Direction::PingPong, 4), vec![0, 1, 2, 3, 2, 1, 0, 1, 2, 3, 2, 1]);
+        // Degenerate lengths stay put.
+        assert_eq!(order(Direction::PingPong, 1), vec![0, 0]);
+        assert_eq!(order(Direction::PingPong, 2), vec![0, 1, 0, 1]);
+        // Every cell has a first occurrence in a pass, and the mapping agrees.
+        for dir in [Direction::Forward, Direction::Reverse, Direction::PingPong] {
+            for len in 1..=32 {
+                for cell in 0..len {
+                    let k = cell_step_in_pass(3, cell, len, dir);
+                    assert_eq!(play_pos(k, len, dir).position, cell);
+                    assert_eq!(play_pos(k, len, dir).pass, 3);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn note_counting_follows_playing_order() {
+        let p = pattern(4, 4, 2, 0); // x.x.
+        // Reverse plays cells 3,2,1,0: notes at offsets 1 and 3.
+        let idx: Vec<_> = (0..8).map(|k| song_note_index(k, 4, Direction::Reverse, &p)).collect();
+        assert_eq!(idx, vec![0, 0, 1, 1, 2, 2, 3, 3]);
+        // Ping-pong 0 1 2 3 2 1: notes at cells 0, 2, 2 → 3 per pass.
+        let idx: Vec<_> = (0..7).map(|k| song_note_index(k, 4, Direction::PingPong, &p)).collect();
+        assert_eq!(idx, vec![0, 1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn probability() {
+        assert!((0..1000).all(|k| passes_probability(100, 0, k)));
+        assert!((0..1000).all(|k| !passes_probability(0, 0, k)));
+        let hits = (0..10_000).filter(|&k| passes_probability(30, 2, k)).count();
+        assert!((2_700..3_300).contains(&hits), "{hits}");
+        // Same position, same answer; different tracks roll independently.
+        assert_eq!(passes_probability(50, 1, 77), passes_probability(50, 1, 77));
+        let same = (0..1000).filter(|&k| passes_probability(50, 0, k) == passes_probability(50, 1, k)).count();
+        assert!((400..600).contains(&same), "{same}");
+    }
+
+    #[test]
+    fn gate_lengths() {
+        // 50 % of a 1/16 step = 1/8 beat; 500 ms at 120 BPM = 1 beat.
+        assert_eq!(gate_beats(GateUnit::Percent, 50, 0.0, 0.25, 120.0), 0.125);
+        assert_eq!(gate_beats(GateUnit::Percent, 200, 0.0, 0.25, 120.0), 0.5);
+        assert!((gate_beats(GateUnit::Ms, 0, 500.0, 0.25, 120.0) - 1.0).abs() < 1e-12);
+        // 0 % is clamped to 1 ms rather than a zero-length note.
+        assert!((gate_beats(GateUnit::Percent, 0, 0.0, 0.25, 120.0) - 0.002).abs() < 1e-12);
     }
 
     #[test]
