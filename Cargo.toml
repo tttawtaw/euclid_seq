@@ -1,0 +1,29 @@
+[package]
+name = "euclid_seq"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal euclidean MIDI step sequencer (CLAP / VST3)"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# `cargo run --release --features standalone -- --backend dummy`
+# opens the GUI without a DAW: handy for UI work.
+standalone = ["nih_plug/standalone"]
+
+[[bin]]
+name = "euclid_seq_standalone"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
