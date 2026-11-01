@@ -241,6 +241,70 @@ impl Ramp {
     }
 }
 
+/// Apply manual edits to a pattern: `added` steps always play, `removed` steps
+/// never do. Bit `i` of each mask is step `i`.
+pub fn apply_overrides(mut pattern: [bool; MAX_STEPS], added: u32, removed: u32) -> [bool; MAX_STEPS] {
+    for (i, hit) in pattern.iter_mut().enumerate() {
+        let bit = 1u32 << i;
+        if added & bit != 0 {
+            *hit = true;
+        } else if removed & bit != 0 {
+            *hit = false;
+        }
+    }
+    pattern
+}
+
+/// New (added, removed) masks after toggling `step` whose current state is `is_hit`.
+/// Toggling twice always returns to the original masks, so a manual edit can be
+/// undone by repeating it.
+pub fn toggle_override(added: u32, removed: u32, step: usize, is_hit: bool) -> (u32, u32) {
+    let bit = 1u32 << step;
+    match (is_hit, added & bit != 0, removed & bit != 0) {
+        (true, true, _) => (added & !bit, removed),  // undo a manual add
+        (true, false, _) => (added, removed | bit),  // remove a euclidean hit
+        (false, _, true) => (added, removed & !bit), // undo a manual removal
+        (false, _, false) => (added | bit, removed), // add a note on a rest
+    }
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VelocityMode {
+    #[name = "Off"]
+    Off,
+    #[name = "Up"]
+    Up,
+    #[name = "Down"]
+    Down,
+}
+
+/// Velocity for the `note_index`-th note (0-based, counted from the start of the
+/// sequence) out of `total_notes` notes in the pattern.
+///
+/// The ramp runs from `low` to `high` (Up) or `high` to `low` (Down) over
+/// `length` notes, then starts again. `length` is clamped to the number of
+/// notes in the pattern; a length of 1 (or mode Off) gives the fixed `base`.
+pub fn ramp_velocity(
+    base: i32,
+    mode: VelocityMode,
+    low: i32,
+    high: i32,
+    length: usize,
+    note_index: usize,
+    total_notes: usize,
+) -> i32 {
+    let n = length.min(total_notes);
+    if mode == VelocityMode::Off || n <= 1 {
+        return base;
+    }
+    let t = (note_index % n) as f64 / (n - 1) as f64;
+    let (from, to) = match mode {
+        VelocityMode::Up => (low, high),
+        _ => (high, low),
+    };
+    from + (t * (to - from) as f64).round() as i32
+}
+
 /// Small, fast, well-mixed hash; deterministic across platforms.
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -426,6 +490,42 @@ mod tests {
         // Not degenerate: uses a good part of the range.
         let distinct: std::collections::HashSet<_> = a.iter().collect();
         assert!(distinct.len() >= 10, "{a:?}");
+    }
+
+    #[test]
+    fn velocity_ramp() {
+        let v = |mode, len, i, total| ramp_velocity(75, mode, 40, 100, len, i, total);
+        let up: Vec<_> = (0..8).map(|i| v(VelocityMode::Up, 4, i, 8)).collect();
+        assert_eq!(up, vec![40, 60, 80, 100, 40, 60, 80, 100]);
+        let down: Vec<_> = (0..4).map(|i| v(VelocityMode::Down, 4, i, 8)).collect();
+        assert_eq!(down, vec![100, 80, 60, 40]);
+        // Length 2 alternates between the two values.
+        let alt: Vec<_> = (0..4).map(|i| v(VelocityMode::Up, 2, i, 5)).collect();
+        assert_eq!(alt, vec![40, 100, 40, 100]);
+        // Length 1 or Off: fixed at the base velocity.
+        assert_eq!(v(VelocityMode::Up, 1, 3, 8), 75);
+        assert_eq!(v(VelocityMode::Off, 4, 3, 8), 75);
+        // Length is capped at the number of notes in the pattern.
+        let capped: Vec<_> = (0..3).map(|i| v(VelocityMode::Up, 32, i, 3)).collect();
+        assert_eq!(capped, vec![40, 70, 100]);
+    }
+
+    #[test]
+    fn manual_overrides() {
+        let base = pattern(8, 8, 3, 0); // x..x..x.
+        let show = |p: [bool; MAX_STEPS]| -> String { p[..8].iter().map(|&b| if b { 'x' } else { '.' }).collect() };
+
+        // Add step 1, remove step 3.
+        let (a, r) = toggle_override(0, 0, 1, base[1]);
+        let (a, r) = toggle_override(a, r, 3, base[3]);
+        let edited = apply_overrides(base, a, r);
+        assert_eq!(show(edited), "xx....x.");
+
+        // Toggling the same steps again restores the original masks.
+        let (a, r) = toggle_override(a, r, 1, edited[1]);
+        let (a, r) = toggle_override(a, r, 3, edited[3]);
+        assert_eq!((a, r), (0, 0));
+        assert_eq!(show(apply_overrides(base, a, r)), "x..x..x.");
     }
 
     #[test]

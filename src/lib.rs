@@ -1,18 +1,17 @@
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::Arc;
 
 mod editor;
 pub mod sequencer;
 
 use sequencer::{
-    note_name, parse_note_name, pattern, scale_note, Ramp, RampMode, RampRange, Scale, MAX_STEPS,
-    STEPS_PER_BEAT,
+    apply_overrides, note_name, parse_note_name, pattern, ramp_velocity, scale_note, Ramp, RampMode,
+    RampRange, Scale, VelocityMode, MAX_STEPS, STEPS_PER_BEAT,
 };
 
 pub const NUM_TRACKS: usize = 4;
-const VELOCITY: f32 = 100.0 / 127.0;
 
 pub struct EuclidSeq {
     params: Arc<EuclidSeqParams>,
@@ -86,6 +85,32 @@ pub struct TrackParams {
     /// Selects which random melody the Random ramp plays.
     #[id = "ramp_seed"]
     pub ramp_seed: IntParam,
+
+    /// Fixed velocity (0-127). Also used when the velocity ramp is off or has length 1.
+    #[id = "velocity"]
+    pub velocity: IntParam,
+
+    #[id = "vel_mode"]
+    pub vel_mode: EnumParam<VelocityMode>,
+
+    #[id = "vel_low"]
+    pub vel_low: IntParam,
+
+    #[id = "vel_high"]
+    pub vel_high: IntParam,
+
+    /// Notes per velocity ramp; capped at the number of notes in the pattern.
+    #[id = "vel_length"]
+    pub vel_length: IntParam,
+
+    /// Manually added steps (bit i = step i), toggled with Cmd+click.
+    /// Saved with the project but not exposed as host parameters.
+    #[persist = "added"]
+    pub added: AtomicU32,
+
+    /// Euclidean hits manually removed with Cmd+click.
+    #[persist = "removed"]
+    pub removed: AtomicU32,
 }
 
 impl TrackParams {
@@ -129,6 +154,13 @@ impl TrackParams {
                 })),
             ramp_seed: IntParam::new(name("Ramp Seed"), 1, IntRange::Linear { min: 0, max: 9999 })
                 .non_automatable(),
+            velocity: IntParam::new(name("Velocity"), 75, IntRange::Linear { min: 0, max: 127 }),
+            vel_mode: EnumParam::new(name("Velocity Ramp"), VelocityMode::Off),
+            vel_low: IntParam::new(name("Velocity Low"), 40, IntRange::Linear { min: 0, max: 127 }),
+            vel_high: IntParam::new(name("Velocity High"), 110, IntRange::Linear { min: 0, max: 127 }),
+            vel_length: IntParam::new(name("Velocity Length"), 4, IntRange::Linear { min: 1, max: 32 }),
+            added: AtomicU32::new(0),
+            removed: AtomicU32::new(0),
         }
     }
 
@@ -146,13 +178,49 @@ impl TrackParams {
         (self.euclid_pulses.value() as usize).min(self.effective_euclid_steps())
     }
 
-    pub fn current_pattern(&self) -> [bool; MAX_STEPS] {
+    /// The euclidean pattern before manual edits.
+    pub fn euclid_pattern(&self) -> [bool; MAX_STEPS] {
         pattern(
             self.length.value() as usize,
             self.effective_euclid_steps(),
             self.effective_pulses(),
             self.rotate.value(),
         )
+    }
+
+    /// The pattern that actually plays: euclidean hits plus manual edits,
+    /// limited to the sequence length.
+    pub fn current_pattern(&self) -> [bool; MAX_STEPS] {
+        let mut p = apply_overrides(
+            self.euclid_pattern(),
+            self.added.load(Ordering::Relaxed),
+            self.removed.load(Ordering::Relaxed),
+        );
+        for hit in p.iter_mut().skip(self.length.value() as usize) {
+            *hit = false;
+        }
+        p
+    }
+
+    /// Velocity (0-127) of the note on `step` of `pattern`.
+    pub fn step_velocity(&self, step: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
+        let len = self.length.value() as usize;
+        let note_index = pattern[..step.min(len)].iter().filter(|&&h| h).count();
+        let total = pattern[..len].iter().filter(|&&h| h).count();
+        ramp_velocity(
+            self.velocity.value(),
+            self.vel_mode.value(),
+            self.vel_low.value(),
+            self.vel_high.value(),
+            self.vel_length.value() as usize,
+            note_index,
+            total,
+        )
+    }
+
+    /// Number of notes in the playing pattern (the velocity ramp's max length).
+    pub fn note_count(&self) -> usize {
+        self.current_pattern().iter().filter(|&&h| h).count()
     }
 
     pub fn ramp(&self) -> Ramp {
@@ -284,15 +352,17 @@ impl Plugin for EuclidSeq {
                 }
                 let length = track.length.value() as i64;
                 let step = (tick / 2).rem_euclid(length) as usize;
-                if track.current_pattern()[step] {
+                let pattern = track.current_pattern();
+                if pattern[step] {
                     let note = track.step_note(step);
+                    let velocity = track.step_velocity(step, &pattern) as f32 / 127.0;
                     let channel = (track.channel.value() - 1) as u8;
                     context.send_event(NoteEvent::NoteOn {
                         timing,
                         voice_id: None,
                         channel,
                         note,
-                        velocity: VELOCITY,
+                        velocity,
                     });
                     self.held[t] = Some((note, channel));
                 }

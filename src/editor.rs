@@ -8,11 +8,11 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-use crate::sequencer::{note_name, RampMode, RampRange, Scale, MAX_STEPS};
+use crate::sequencer::{note_name, toggle_override, RampMode, RampRange, Scale, MAX_STEPS};
 use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS};
 
 const WIDTH: u32 = 910;
-const HEIGHT: u32 = 340;
+const HEIGHT: u32 = 470;
 
 const BG: Color32 = Color32::from_rgb(0x17, 0x17, 0x19);
 const PANEL: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
@@ -137,6 +137,13 @@ fn top_bar(
             ui.add_space(6.0);
             pill_toggle(ui, setter, &track.on, "ON", "OFF");
             ui.add_space(12.0);
+            if text_button(ui, "RESET", "Reset this track's settings to their defaults\n(keeps ON and the MIDI channel)") {
+                reset_track(setter, track);
+            }
+            if text_button(ui, "CLEAR", "Remove every note from this track\n(Pulses to 0, manual edits cleared)") {
+                clear_track(setter, track);
+            }
+            ui.add_space(12.0);
             let rot = match track.rotate.value() {
                 0 => String::new(),
                 r => format!(" {r:+}"),
@@ -161,6 +168,8 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
     let length = track.length.value() as usize;
     let e_steps = track.effective_euclid_steps();
     let pattern = track.current_pattern();
+    let added = track.added.load(Ordering::Relaxed);
+    let removed = track.removed.load(Ordering::Relaxed);
     let ramp = track.ramp();
     let (lo, hi) = ramp.bounds(track.scale.value());
     let on = track.on.value();
@@ -177,6 +186,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
         let min = grid_rect.min + vec2(col as f32 * (cell + gap), row as f32 * (cell + gap));
         let rect = Rect::from_min_size(min, vec2(cell, cell));
         let resp = ui.interact(rect, Id::new(("step", i)), Sense::click());
+        let bit = 1u32 << i;
 
         let active = i < length;
         let hit = active && pattern[i];
@@ -210,21 +220,69 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
             );
         }
 
+        // Velocity: a bar along the bottom of each hit, as wide as it is loud.
+        if hit {
+            let vel = track.step_velocity(i, &pattern) as f32 / 127.0;
+            let w = (cell - 10.0) * vel;
+            let bar = Rect::from_min_size(pos2(rect.left() + 5.0, rect.bottom() - 6.0), vec2(w.max(1.0), 2.5));
+            painter.rect_filled(bar, CornerRadius::ZERO, BG);
+        }
+
         // Small marker at the start of each euclidean cycle.
         if active && e_steps > 0 && i % e_steps == 0 {
             let c = pos2(rect.left() + 6.0, rect.top() + 6.0);
             painter.circle_filled(c, 2.0, if hit { BG } else { ACCENT_DIM });
         }
 
-        if resp.clicked() {
+        // Manual edits: a corner notch on added notes, an outline on removed ones.
+        if active && added & bit != 0 {
+            let tr = rect.right_top();
+            painter.add(Shape::convex_polygon(
+                vec![tr + vec2(-11.0, 0.0), tr, tr + vec2(0.0, 11.0)],
+                if hit { BG } else { ACCENT_DIM },
+                Stroke::NONE,
+            ));
+        }
+        if active && !hit && removed & bit != 0 {
+            painter.rect_stroke(rect.shrink(1.0), CornerRadius::same(4), Stroke::new(1.5_f32, ACCENT_DIM), StrokeKind::Inside);
+        }
+
+        // Cmd+click (or Ctrl+click / right-click, which hosts never swallow)
+        // toggles the step; a plain click sets the sequence length.
+        let modifiers = ui.input(|inp| inp.modifiers);
+        let edit_click = (resp.clicked() && (modifiers.mac_cmd || modifiers.command || modifiers.ctrl))
+            || resp.secondary_clicked();
+        if edit_click && active {
+            let (a, r) = toggle_override(added, removed, i, hit);
+            track.added.store(a, Ordering::Relaxed);
+            track.removed.store(r, Ordering::Relaxed);
+        } else if resp.clicked() {
             set(setter, &track.length, i as i32 + 1);
         }
+
         let hover = if active {
             let note = note_name(track.step_note(i) as i32);
-            let state = if hit { "hit" } else { "rest" };
-            format!("Step {} · {} ({})\nClick to end the sequence here", i + 1, note, state)
+            let what = if hit {
+                format!("{} · velocity {}", note, track.step_velocity(i, &pattern))
+            } else {
+                format!("{} (rest)", note)
+            };
+            let manual = if added & bit != 0 {
+                " · added by hand"
+            } else if removed & bit != 0 {
+                " · removed by hand"
+            } else {
+                ""
+            };
+            format!(
+                "Step {} · {}{}\nClick: end the sequence here\nCmd+click: {} a note",
+                i + 1,
+                what,
+                manual,
+                if hit { "remove" } else { "add" }
+            )
         } else {
-            format!("Step {}\nClick to end the sequence here", i + 1)
+            format!("Step {}\nClick: end the sequence here", i + 1)
         };
         resp.on_hover_text(hover);
     }
@@ -243,7 +301,7 @@ fn group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 
 fn controls(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, page: usize) {
     ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 22.0;
+        ui.spacing_mut().item_spacing.x = 34.0;
 
         group(ui, "RHYTHM", |ui| {
             let linked = track.link.value();
@@ -281,8 +339,13 @@ fn controls(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, page: usize)
                 ui.label(egui::RichText::new("SCALE").color(TEXT_DIM).size(10.5));
             });
         });
+    });
 
-        group(ui, "RAMP", |ui| {
+    ui.add_space(12.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 34.0;
+
+        group(ui, "PITCH RAMP", |ui| {
             let mode = KnobStyle { stepped: Some(4), ..Default::default() };
             knob(ui, setter, &track.ramp_mode, "MODE", mode);
             ui.vertical(|ui| {
@@ -303,7 +366,64 @@ fn controls(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, page: usize)
                 dice_button(ui, setter, &track.ramp_seed, enabled);
             });
         });
+
+        group(ui, "VELOCITY", |ui| {
+            knob(ui, setter, &track.velocity, "VELOCITY", KnobStyle::default());
+            let mode = KnobStyle { stepped: Some(3), ..Default::default() };
+            knob(ui, setter, &track.vel_mode, "MODE", mode);
+            knob(ui, setter, &track.vel_low, "LOW", KnobStyle::default());
+            knob(ui, setter, &track.vel_high, "HIGH", KnobStyle::default());
+            // Show the length actually used: capped at the notes in the pattern.
+            let used = (track.vel_length.value() as usize).min(track.note_count()).max(1);
+            let length = KnobStyle { text: Some(used.to_string()), ..Default::default() };
+            knob(ui, setter, &track.vel_length, "LENGTH", length);
+        });
     });
+}
+
+/// Empties the track: no euclidean pulses, no manually added notes.
+fn clear_track(setter: &ParamSetter, track: &TrackParams) {
+    set(setter, &track.euclid_pulses, 0);
+    track.added.store(0, Ordering::Relaxed);
+    track.removed.store(0, Ordering::Relaxed);
+}
+
+/// Every setting of the track back to its default, except whether the track is
+/// on and its MIDI channel (resetting those would silence or reroute it).
+fn reset_track(setter: &ParamSetter, track: &TrackParams) {
+    for (id, ptr, _) in track.param_map() {
+        if id == "on" || id == "channel" {
+            continue;
+        }
+        // SAFETY: the pointers come from this track's own param map and stay
+        // valid for as long as the plugin's parameters live.
+        unsafe {
+            let ctx = setter.raw_context;
+            ctx.raw_begin_set_parameter(ptr);
+            ctx.raw_set_parameter_normalized(ptr, ptr.default_normalized_value());
+            ctx.raw_end_set_parameter(ptr);
+        }
+    }
+    track.added.store(0, Ordering::Relaxed);
+    track.removed.store(0, Ordering::Relaxed);
+}
+
+/// Small text button; returns true when clicked.
+fn text_button(ui: &mut Ui, label: &str, hint: &str) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(58.0, 24.0), Sense::click());
+    let p = ui.painter();
+    let (fill, color) = if resp.is_pointer_button_down_on() {
+        (ACCENT, BG)
+    } else if resp.hovered() {
+        (CELL_OFF, ACCENT)
+    } else {
+        (PANEL, TEXT)
+    };
+    p.rect_filled(rect, CornerRadius::same(5), fill);
+    p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(11.5), color);
+    let clicked = resp.clicked();
+    resp.on_hover_text(hint);
+    clicked
 }
 
 #[derive(Default)]

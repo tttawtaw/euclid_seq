@@ -10,6 +10,8 @@ Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab
 
 - **ON / OFF** – only track 1 is on by default.
 - **CH** – MIDI channel (defaults: track 1 → ch 1, track 2 → ch 2, …). Drag or scroll.
+- **CLEAR** – removes every note from the track (Pulses to 0, manual edits cleared).
+- **RESET** – returns all of the track's settings to their defaults and clears manual edits. It keeps ON and CH, so the track isn't silenced or rerouted.
 
 ## Controls
 
@@ -31,7 +33,7 @@ Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab
 | Root | C0–C6 | Root note (MIDI 60 = C3, the Ableton/Bitwig convention). Type a value like `F#2` or `54`. |
 | Scale | 8 scales | Major, Minor, Dorian, Mixolydian, Harmonic Minor, Major Pentatonic, Minor Pentatonic, Chromatic. |
 
-**Ramp** – gives each step its own pitch, always locked to the scale.
+**Pitch ramp** – gives each step its own pitch, always locked to the scale.
 
 | Control | Options | What it does |
 |---|---|---|
@@ -41,6 +43,25 @@ Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab
 | Dice | – | (Random only) re-rolls the random melody. The melody is saved with your project. |
 
 The ramp is tied to step positions, not to hits. So Rotate, Pulses and E. Steps change *which* notes of the contour get played, which makes them a quick way to vary a melody. With a ramp active, each grid cell shows its pitch as a short line (higher line = higher note), and hovering a cell shows its note name.
+
+**Velocity**
+
+| Control | Range | What it does |
+|---|---|---|
+| Velocity | 0–127 (default 75) | Fixed velocity, used when the ramp is off or its length is 1. 0 is silent (MIDI treats it as a note-off). |
+| Mode | Off / Up / Down | Ramp from Low to High (Up) or High to Low (Down). |
+| Low / High | 0–127 | The two values the ramp moves between. |
+| Length | 1 … notes in pattern | Notes per ramp before it starts again. 2 alternates Low/High; 1 = fixed Velocity. Capped at the number of notes in the pattern (the knob shows the length in use). |
+
+The velocity ramp counts *notes*, not steps, and restarts at the top of each sequence loop. Each hit shows its velocity as a bar along the bottom of its cell.
+
+**Editing steps by hand**
+
+- **Cmd+click** a step to add a note, or Cmd+click a note to remove it. **Ctrl+click** and **right-click** do the same, which helps in hosts that keep the Cmd key for themselves.
+- Repeat the click to undo an edit.
+- Added notes get a corner notch; removed ones keep an outline.
+- Edits stick to their step position and are saved with your project.
+- A plain click on a step still sets the sequence length.
 
 Knobs: drag vertically (Shift = fine), scroll for single steps, double‑click to reset.
 
@@ -72,7 +93,7 @@ GUI without a DAW (dev only):
 cargo run --release --features standalone -- --backend dummy --tempo 120
 ```
 
-Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, ramps, scale math, sample‑accurate tick timing across block sizes):
+Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, pitch and velocity ramps, manual edits, scale math, sample‑accurate tick timing across block sizes):
 
 ```sh
 cargo test --lib
@@ -88,7 +109,7 @@ cargo test --lib
 
 - `src/sequencer.rs` – pure logic: Bjorklund, rotation, scales, ramps, note names, block tick timing (unit tested, allocation‑free)
 - `src/lib.rs` – plugin, per-track parameters, MIDI output in `process()`
-- `src/editor.rs` – egui GUI: track pages, step grid, knobs, link button, ramp controls
+- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), knobs, link button, ramps, Clear/Reset
 
 ## Known notes
 
