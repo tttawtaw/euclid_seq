@@ -237,16 +237,29 @@ pub enum RampRange {
     Two,
     #[name = "4 Oct"]
     Four,
+    /// Set in semitones with the range knob (−36…+36).
+    #[name = "Custom"]
+    Custom,
 }
 
 impl RampRange {
     pub const ALL: [RampRange; 3] = [RampRange::One, RampRange::Two, RampRange::Four];
 
+    /// Octaves of the preset ranges (Custom has none).
     pub fn octaves(self) -> i32 {
         match self {
             RampRange::One => 1,
             RampRange::Two => 2,
             RampRange::Four => 4,
+            RampRange::Custom => 0,
+        }
+    }
+
+    /// Range in semitones; `custom` is the range knob's value.
+    pub fn semitones(self, custom: i32) -> i32 {
+        match self {
+            RampRange::Custom => custom,
+            preset => preset.octaves() * 12,
         }
     }
 }
@@ -255,18 +268,39 @@ impl RampRange {
 #[derive(Debug, Clone, Copy)]
 pub struct Ramp {
     pub mode: RampMode,
-    pub octaves: i32,
+    /// Signed range in semitones: positive reaches above the root, negative
+    /// below it (both sides when bipolar).
+    pub semitones: i32,
     pub bipolar: bool,
     pub seed: u32,
+}
+
+/// Semitones from the root to scale degree `degree` (degree ≥ 0).
+fn degree_semitones(degree: i32, scale: Scale) -> i32 {
+    let iv = scale.intervals();
+    let len = iv.len() as i32;
+    degree.div_euclid(len) * 12 + iv[degree.rem_euclid(len) as usize]
+}
+
+/// How many scale steps fit within `semitones` above the root, so a range set
+/// in semitones stays in key (e.g. 7 semitones in Minor = 4 steps, C→G).
+pub fn degrees_within(semitones: i32, scale: Scale) -> i32 {
+    let mut d = 0;
+    while degree_semitones(d + 1, scale) <= semitones {
+        d += 1;
+    }
+    d
 }
 
 impl Ramp {
     /// Lowest and highest scale degree the ramp can reach. Working in scale
     /// degrees (not semitones) is what keeps every ramp note in key.
     pub fn bounds(&self, scale: Scale) -> (i32, i32) {
-        let span = self.octaves * scale.intervals().len() as i32;
+        let span = degrees_within(self.semitones.abs(), scale);
         if self.bipolar {
             (-span, span)
+        } else if self.semitones < 0 {
+            (-span, 0)
         } else {
             (0, span)
         }
@@ -477,7 +511,7 @@ pub fn gate_beats(unit: GateUnit, percent: i32, ms: f32, step_beats: f64, tempo:
 }
 
 /// Small, fast, well-mixed hash; deterministic across platforms.
-fn splitmix64(mut x: u64) -> u64 {
+pub fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -636,11 +670,39 @@ mod tests {
         // Chromatic: one degree = one semitone.
         assert_eq!(scale_note(60, 1, Scale::Chromatic), 61);
         assert_eq!(scale_note(60, -13, Scale::Chromatic), 47);
-        assert_eq!(Ramp { mode: RampMode::Up, octaves: 2, bipolar: false, seed: 0 }.bounds(Scale::Chromatic), (0, 24));
+        assert_eq!(Ramp { mode: RampMode::Up, semitones: 24, bipolar: false, seed: 0 }.bounds(Scale::Chromatic), (0, 24));
     }
 
     fn ramp(mode: RampMode, octaves: i32, bipolar: bool) -> Ramp {
-        Ramp { mode, octaves, bipolar, seed: 1 }
+        Ramp { mode, semitones: octaves * 12, bipolar, seed: 1 }
+    }
+
+    #[test]
+    fn semitone_ranges_stay_in_key() {
+        // Octave presets give the same spans as before.
+        assert_eq!(degrees_within(12, Scale::Major), 7);
+        assert_eq!(degrees_within(48, Scale::MinorPentatonic), 20);
+        // Partial ranges: the highest scale step that fits.
+        assert_eq!(degrees_within(7, Scale::Minor), 4); // C→G
+        assert_eq!(degrees_within(6, Scale::Minor), 3); // C→F (F# not in scale)
+        assert_eq!(degrees_within(5, Scale::Chromatic), 5);
+        assert_eq!(degrees_within(0, Scale::Major), 0);
+        let r = |semitones, bipolar| Ramp { mode: RampMode::Up, semitones, bipolar, seed: 0 }.bounds(Scale::Minor);
+        assert_eq!(r(7, false), (0, 4));
+        assert_eq!(r(-7, false), (-4, 0)); // below the root
+        assert_eq!(r(-7, true), (-4, 4));
+        assert_eq!(r(36, false), (0, 21)); // 3 octaves of a 7-note scale
+        // The top of a range never overshoots it in semitones.
+        for scale in Scale::ALL {
+            for st in 0..=36 {
+                let (_, hi) = r_scale(st, scale);
+                assert!(scale_note(48, hi, scale) as i32 - 48 <= st, "{scale:?} {st}");
+            }
+        }
+    }
+
+    fn r_scale(semitones: i32, scale: Scale) -> (i32, i32) {
+        Ramp { mode: RampMode::Up, semitones, bipolar: false, seed: 0 }.bounds(scale)
     }
 
     fn degrees(r: Ramp, len: usize, scale: Scale) -> Vec<i32> {

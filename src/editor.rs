@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::sequencer::{
-    cell_step_in_pass, note_name, play_pos, toggle_override, Direction, GateUnit, Rate, RampMode, RampRange, Scale,
-    MAX_STEPS,
+    cell_step_in_pass, note_name, play_pos, splitmix64, toggle_override, Direction, GateUnit, Rate, RampMode,
+    RampRange, Scale, MAX_STEPS,
 };
 use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS, STOPPED};
 
-const WIDTH: u32 = 950;
-const HEIGHT: u32 = 630;
+const WIDTH: u32 = 1020;
+const HEIGHT: u32 = 640;
 
 const BG: Color32 = Color32::from_rgb(0x17, 0x17, 0x19);
 const PANEL: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
@@ -25,6 +25,8 @@ const ACCENT: Color32 = Color32::from_rgb(0xff, 0x8a, 0x1f);
 const ACCENT_DIM: Color32 = Color32::from_rgb(0x7a, 0x47, 0x18);
 const TEXT: Color32 = Color32::from_rgb(0xe8, 0xe6, 0xe3);
 const TEXT_DIM: Color32 = Color32::from_rgb(0x8a, 0x88, 0x86);
+const MUTE_COLOR: Color32 = Color32::from_rgb(0xd9, 0x4f, 0x4f);
+const SOLO_COLOR: Color32 = Color32::from_rgb(0xe8, 0xc5, 0x47);
 /// Background of the control panels, a shade above the window background.
 const SECTION: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x21);
 
@@ -87,7 +89,7 @@ fn copy_track(track: &TrackParams, from: usize) -> TrackSnapshot {
 /// it keeps playing its own instrument.
 fn paste_track(setter: &ParamSetter, track: &TrackParams, snap: &TrackSnapshot) {
     for (id, ptr, _) in track.param_map() {
-        if id == "on" || id == "channel" {
+        if matches!(id.as_str(), "on" | "channel" | "mute" | "solo") {
             continue;
         }
         if let Some((_, v)) = snap.values.iter().find(|(sid, _)| *sid == id) {
@@ -125,7 +127,8 @@ pub fn create(params: Arc<EuclidSeqParams>, playheads: Playheads) -> Option<Box<
                     let track = &params.tracks[state.page];
                     let (playhead, loop_idx) = split_playhead(track, playheads[state.page].load(Ordering::Relaxed));
                     ui.add_space(14.0);
-                    step_grid(ui, track, setter, playhead, loop_idx);
+                    let any_solo = params.tracks.iter().any(|t| t.solo.value());
+                    step_grid(ui, track, setter, playhead, loop_idx, any_solo);
                     ui.add_space(16.0);
                     controls(ui, &params, track, setter, state.page);
                 });
@@ -142,8 +145,8 @@ fn set<P: Param>(setter: &ParamSetter, param: &P, value: P::Plain) {
 }
 
 /// Is this track sounding a note right now? Drives the tab activity light.
-fn is_firing(track: &TrackParams, playhead: i32) -> bool {
-    track.on.value()
+fn is_firing(track: &TrackParams, playhead: i32, any_solo: bool) -> bool {
+    track.audible(any_solo)
         && playhead >= 0
         && (playhead as usize) < MAX_STEPS
         && track.current_pattern()[playhead as usize]
@@ -155,9 +158,12 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
         ui.label(egui::RichText::new("EUCLID SEQ").color(TEXT).strong().size(16.0));
         ui.add_space(18.0);
 
-        // Track tabs: number, dim when the track is off, light when it fires.
+        // Track tabs: number, dim when the track can't be heard, light when
+        // it fires; each followed by its Mute and Solo buttons.
+        let any_solo = params.tracks.iter().any(|t| t.solo.value());
+        ui.spacing_mut().item_spacing.x = 3.0;
         for (t, track) in params.tracks.iter().enumerate() {
-            let (rect, resp) = ui.allocate_exact_size(vec2(46.0, 26.0), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 26.0), Sense::click());
             let p = ui.painter();
             let selected = *page == t;
             let fill = if selected { CELL_OFF } else if resp.hovered() { PANEL } else { BG };
@@ -165,26 +171,26 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
             if selected {
                 p.rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0_f32, ACCENT_DIM), StrokeKind::Inside);
             }
-            let text_color = match (selected, track.on.value()) {
+            let text_color = match (selected, track.audible(any_solo)) {
                 (true, _) => TEXT,
                 (false, true) => TEXT_DIM,
                 (false, false) => CELL_OFF,
             };
             p.text(
-                rect.center() - vec2(5.0, 0.0),
+                rect.center() - vec2(4.0, 0.0),
                 Align2::CENTER_CENTER,
                 format!("{}", t + 1),
                 FontId::monospace(13.0),
                 text_color,
             );
-            let dot = if is_firing(track, split_playhead(track, playheads[t].load(Ordering::Relaxed)).0) {
+            let dot = if is_firing(track, split_playhead(track, playheads[t].load(Ordering::Relaxed)).0, any_solo) {
                 ACCENT
-            } else if track.on.value() {
+            } else if track.audible(any_solo) {
                 ACCENT_DIM
             } else {
                 CELL_OFF
             };
-            p.circle_filled(pos2(rect.right() - 12.0, rect.center().y), 3.5, dot);
+            p.circle_filled(pos2(rect.right() - 8.0, rect.center().y), 3.0, dot);
             if resp.clicked() {
                 *page = t;
                 // Going to a track means you want to hear it.
@@ -193,7 +199,12 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
                 }
             }
             resp.on_hover_text(format!("Track {} (opening it turns it on)", t + 1));
+            flag_button(ui, setter, &track.mute, "M", MUTE_COLOR, &format!("Mute track {}", t + 1));
+            flag_button(ui, setter, &track.solo, "S", SOLO_COLOR, &format!("Solo track {}\n(when any track is soloed, only soloed tracks play)", t + 1));
+            ui.add_space(7.0);
         }
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add_space(12.0);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let track = &params.tracks[*page];
@@ -203,6 +214,13 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
             ui.add_space(12.0);
             if text_button(ui, "RESET", "Reset this track's settings to their defaults\n(keeps ON and the MIDI channel)") {
                 reset_track(setter, track);
+            }
+            if text_button(
+                ui,
+                "RANDOM",
+                "Randomise this track's Steps, E. Steps, Pulses, Pitch,\nramp Mode, ramp Range (1/2/4 oct) and ramp Length",
+            ) {
+                randomize_track(setter, track);
             }
             if text_button(ui, "CLEAR", "Remove every note from this track\n(Pulses to 0, manual edits and step pitches cleared)") {
                 clear_track(setter, track);
@@ -236,14 +254,15 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
 /// `loop_idx` is which pass through the sequence is playing; velocity ramps
 /// longer than the pattern differ from loop to loop, so the grid shows the
 /// current one.
-fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i32, loop_idx: i64) {
+fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i32, loop_idx: i64, any_solo: bool) {
     let length = track.length.value() as usize;
     let e_steps = track.effective_euclid_steps();
     let pattern = track.current_pattern();
     let added = track.added.load(Ordering::Relaxed);
     let removed = track.removed.load(Ordering::Relaxed);
     let ramp = track.ramp();
-    let on = track.on.value();
+    // Off, muted or soloed out: show the pattern quietly.
+    let on = track.audible(any_solo);
     let dir = track.direction.value();
     let offsets = track.pitch_offsets.load();
 
@@ -570,6 +589,13 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
                     segmented(ui, setter, &track.ramp_bipolar, &[(false, "+".into()), (true, "±".into())], 45.0);
                     ui.label(egui::RichText::new("POLARITY").color(TEXT_DIM).size(10.5));
                 });
+                // A custom range in semitones; turning it selects it, clicking
+                // 1/2/4 goes back to octaves.
+                let custom = track.ramp_range.value() == RampRange::Custom;
+                let style = KnobStyle { bipolar: true, dim: !custom, ..KnobStyle::typeable() };
+                if knob(ui, setter, &track.ramp_semitones, "RANGE ST", style).is_some() && !custom {
+                    set(setter, &track.ramp_range, RampRange::Custom);
+                }
                 let enabled = track.ramp_mode.value() == RampMode::Random;
                 ui.vertical(|ui| {
                     ui.add_space(DIAL_Y - 16.0);
@@ -749,7 +775,7 @@ fn clear_track(setter: &ParamSetter, track: &TrackParams) {
 /// on and its MIDI channel (resetting those would silence or reroute it).
 fn reset_track(setter: &ParamSetter, track: &TrackParams) {
     for (id, ptr, _) in track.param_map() {
-        if id == "on" || id == "channel" {
+        if matches!(id.as_str(), "on" | "channel" | "mute" | "solo") {
             continue;
         }
         // SAFETY: the pointers come from this track's own param map and stay
@@ -762,6 +788,46 @@ fn reset_track(setter: &ParamSetter, track: &TrackParams) {
         }
     }
     track.clear_edits();
+}
+
+/// Small square toggle for Mute / Solo, lit in `color` when on.
+fn flag_button(ui: &mut Ui, setter: &ParamSetter, param: &BoolParam, label: &str, color: Color32, hint: &str) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 26.0), Sense::click());
+    let value = param.value();
+    let p = ui.painter();
+    let fill = if value { color } else if resp.hovered() { CELL_OFF } else { PANEL };
+    p.rect_filled(rect, CornerRadius::same(4), fill);
+    p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(11.0), if value { BG } else { TEXT_DIM });
+    if resp.clicked() {
+        set(setter, param, !value);
+    }
+    resp.on_hover_text(hint);
+}
+
+/// New random values for the rhythm and melody shape of a track: Steps,
+/// E. Steps, Pulses, Pitch, ramp Mode, ramp Range (octave presets) and ramp
+/// Length. Ranges are kept musical: at least 4 steps and at least one pulse.
+fn randomize_track(setter: &ParamSetter, track: &TrackParams) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x1234_5678);
+    let mut rnd = |lo: i32, hi: i32| -> i32 {
+        seed = splitmix64(seed);
+        lo + (seed % (hi - lo + 1) as u64) as i32
+    };
+
+    let steps = rnd(4, 32);
+    set(setter, &track.length, steps);
+    // Linked: E. Steps follows Steps. Unlinked: a cycle up to the sequence length.
+    let e_steps = if track.link.value() { steps } else { rnd(2, steps) };
+    set(setter, &track.euclid_steps, e_steps);
+    set(setter, &track.euclid_pulses, rnd(1, e_steps));
+    set(setter, &track.pitch, rnd(-14, 14));
+    let modes = RampMode::variants().len() as i32;
+    set(setter, &track.ramp_mode, RampMode::from_index(rnd(0, modes - 1) as usize));
+    set(setter, &track.ramp_range, RampRange::ALL[rnd(0, 2) as usize]);
+    set(setter, &track.ramp_length, rnd(1, 32));
 }
 
 /// Small text button; returns true when clicked.

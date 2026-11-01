@@ -84,6 +84,14 @@ pub struct TrackParams {
     #[id = "on"]
     pub on: BoolParam,
 
+    /// Silences the track without switching it off.
+    #[id = "mute"]
+    pub mute: BoolParam,
+
+    /// When any track is soloed, only soloed tracks play.
+    #[id = "solo"]
+    pub solo: BoolParam,
+
     /// MIDI channel, 1-based for display.
     #[id = "channel"]
     pub channel: IntParam,
@@ -153,6 +161,10 @@ pub struct TrackParams {
     #[id = "ramp_range"]
     pub ramp_range: EnumParam<RampRange>,
 
+    /// Ramp range in semitones when Range is Custom (−36…+36).
+    #[id = "ramp_semis"]
+    pub ramp_semitones: IntParam,
+
     /// Off: ramp goes 0..+range. On: -range..+range.
     #[id = "ramp_bipolar"]
     pub ramp_bipolar: BoolParam,
@@ -208,11 +220,15 @@ impl TrackParams {
     fn new(index: usize) -> Self {
         // Each track starts with its own rhythm/register so turning one on
         // immediately adds something different. Only track 1 is on by default.
-        let (pulses, e_steps, root) = [(5, 16, 60), (3, 8, 48), (7, 16, 72), (2, 5, 36)][index];
+        // Tracks 2-4 start empty (0 pulses): opening one gives a blank track
+        // to build on, rather than a pattern you didn't ask for.
+        let (pulses, e_steps, root) = [(5, 16, 60), (0, 16, 48), (0, 16, 72), (0, 16, 36)][index];
         let n = index + 1;
         let name = |s: &str| format!("T{n} {s}");
         Self {
             on: BoolParam::new(name("On"), index == 0),
+            mute: BoolParam::new(name("Mute"), false),
+            solo: BoolParam::new(name("Solo"), false),
             channel: IntParam::new(name("Channel"), n as i32, IntRange::Linear { min: 1, max: 16 }),
             length: IntParam::new(name("Steps"), 16, IntRange::Linear { min: 1, max: 32 }),
             link: BoolParam::new(name("Link"), e_steps == 16),
@@ -267,6 +283,9 @@ impl TrackParams {
                 .with_string_to_value(Arc::new(|s| parse_note_name(s))),
             ramp_mode: EnumParam::new(name("Ramp"), RampMode::Off),
             ramp_range: EnumParam::new(name("Ramp Range"), RampRange::One),
+            ramp_semitones: IntParam::new(name("Ramp Range Semitones"), 12, IntRange::Linear { min: -36, max: 36 })
+                .with_value_to_string(Arc::new(|v| format!("{v:+}")))
+                .with_unit(" st"),
             ramp_bipolar: BoolParam::new(name("Ramp Bipolar"), false)
                 .with_value_to_string(Arc::new(|b| if b { "Bi" } else { "Uni" }.into()))
                 .with_string_to_value(Arc::new(|s| match s.trim().to_ascii_lowercase().as_str() {
@@ -348,7 +367,7 @@ impl TrackParams {
     pub fn ramp(&self) -> Ramp {
         Ramp {
             mode: self.ramp_mode.value(),
-            octaves: self.ramp_range.value().octaves(),
+            semitones: self.ramp_range.value().semitones(self.ramp_semitones.value()),
             bipolar: self.ramp_bipolar.value(),
             seed: self.ramp_seed.value() as u32,
         }
@@ -391,6 +410,11 @@ impl TrackParams {
 
     pub fn step_beats(&self) -> f64 {
         self.rate.value().step_beats(self.dotted.value())
+    }
+
+    /// Is this track heard, given ON, Mute and whether any track is soloed?
+    pub fn audible(&self, any_solo: bool) -> bool {
+        self.on.value() && !self.mute.value() && (!any_solo || self.solo.value())
     }
 
     /// Does this track follow the global key and scale?
@@ -540,6 +564,7 @@ impl Plugin for EuclidSeq {
         let params = self.params.clone();
         self.events.clear();
 
+        let any_solo = params.tracks.iter().any(|t| t.solo.value());
         for (t, track) in params.tracks.iter().enumerate() {
             let step_beats = track.step_beats();
             let gate = gate_beats(
@@ -552,10 +577,10 @@ impl Plugin for EuclidSeq {
             let len = track.length.value() as usize;
             let dir = track.direction.value();
             let pattern = track.current_pattern();
-            let on = track.on.value();
+            let on = track.audible(any_solo);
             let probability = track.probability.value();
 
-            // Track switched off: let go of everything right away.
+            // Track off, muted or soloed out: let go of everything right away.
             if !on {
                 self.release_where(t, |_| true, |_| 0);
             }
