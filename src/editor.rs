@@ -564,6 +564,13 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
             group(ui, "PITCH", |ui| {
                 knob(ui, setter, &track.pitch, "PITCH", KnobStyle { bipolar: true, ..KnobStyle::typeable() });
                 knob(ui, setter, &track.root, "ROOT", KnobStyle::typeable());
+                // Octave of the root: moves it by whole octaves, keeping the note.
+                let root = track.root.value();
+                let octave = root.div_euclid(12) - 2;
+                let (lo, hi) = octave_limits(root.rem_euclid(12));
+                if let Some(new) = labelled(ui, "OCTAVE", |ui| octave_stepper(ui, ("oct", page), octave, lo, hi)) {
+                    set(setter, &track.root, root + (new - octave) * 12);
+                }
                 ui.vertical(|ui| {
                     ui.add_space(DIAL_Y - 12.0);
                     if let Some(scale) = scale_combo(ui, ("scale", page), track.scale.value(), 118.0) {
@@ -575,8 +582,8 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
             });
             ui.add_space(14.0);
             group(ui, "PITCH RAMP", |ui| {
-                let mode = KnobStyle { stepped: Some(RampMode::variants().len()), ..Default::default() };
-                knob(ui, setter, &track.ramp_mode, "MODE", mode);
+                // A dropdown, but still the same automatable parameter.
+                labelled(ui, "MODE", |ui| enum_combo(ui, ("ramp_mode", page), setter, &track.ramp_mode, 100.0));
                 ui.vertical(|ui| {
                     ui.add_space(6.0);
                     ui.spacing_mut().item_spacing.y = 6.0;
@@ -669,7 +676,24 @@ fn global_section(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter) {
             }
         }
     });
-    ui.add_space(4.0);
+    // Global octave: every track's root moves into this octave, keeping its note.
+    ui.horizontal(|ui| {
+        ui.add_space(20.0);
+        let octave = params.global_octave.value();
+        if let Some(new) = octave_stepper(ui, "global_oct", octave, 0, 6) {
+            set(setter, &params.global_octave, new);
+            for track in params.tracks.iter() {
+                let pc = track.root.value().rem_euclid(12);
+                let mut root = pc + (new + 2) * 12;
+                if root > 96 {
+                    root -= 12;
+                }
+                set(setter, &track.root, root);
+            }
+        }
+    });
+    ui.label(egui::RichText::new("OCTAVE").color(TEXT_DIM).size(10.5));
+    ui.add_space(8.0);
     if let Some(scale) = scale_combo(ui, "global_scale", params.global_scale.value(), 112.0) {
         set(setter, &params.global_scale, scale);
         for track in params.tracks.iter() {
@@ -788,6 +812,79 @@ fn reset_track(setter: &ParamSetter, track: &TrackParams) {
         }
     }
     track.clear_edits();
+}
+
+/// A widget placed at dial height with a caption under it, matching the knobs.
+fn labelled<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.vertical(|ui| {
+        ui.add_space(DIAL_Y - 12.0);
+        let r = add(ui);
+        ui.add_space(22.0);
+        ui.label(egui::RichText::new(label).color(TEXT_DIM).size(10.5));
+        r
+    })
+    .inner
+}
+
+/// Octaves a root with pitch class `pc` can sit in, within C0 (24) … C6 (96).
+fn octave_limits(pc: i32) -> (i32, i32) {
+    (0, if pc == 0 { 6 } else { 5 })
+}
+
+/// [−] octave [+]; scroll over it works too. Returns the new octave.
+fn octave_stepper(ui: &mut Ui, id: impl std::hash::Hash, octave: i32, min: i32, max: i32) -> Option<i32> {
+    let mut result = None;
+    ui.push_id(id, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let step_button = |ui: &mut Ui, label: &str, enabled: bool| -> bool {
+                let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 24.0), Sense::click());
+                let p = ui.painter();
+                let fill = if enabled && resp.hovered() { CELL_OFF } else { PANEL };
+                p.rect_filled(rect, CornerRadius::same(4), fill);
+                p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(13.0), if enabled { TEXT } else { CELL_OFF });
+                enabled && resp.clicked()
+            };
+            if step_button(ui, "-", octave > min) {
+                result = Some(octave - 1);
+            }
+            let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 24.0), Sense::hover());
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, octave.to_string(), FontId::monospace(13.0), ACCENT);
+            let scroll = if resp.hovered() { ui.input(|i| i.raw_scroll_delta.y) } else { 0.0 };
+            if step_button(ui, "+", octave < max) {
+                result = Some(octave + 1);
+            }
+            if scroll > 0.0 && octave < max {
+                result = Some(octave + 1);
+            } else if scroll < 0.0 && octave > min {
+                result = Some(octave - 1);
+            }
+        });
+    });
+    result
+}
+
+/// Dropdown for any list parameter, in the list's own order. It sets the
+/// parameter like any other control, so hosts can still automate it.
+fn enum_combo<T: Enum + PartialEq + Copy + 'static>(
+    ui: &mut Ui,
+    id: impl std::hash::Hash,
+    setter: &ParamSetter,
+    param: &EnumParam<T>,
+    width: f32,
+) {
+    let names = T::variants();
+    let current = param.value().to_index();
+    egui::ComboBox::from_id_salt(id)
+        .width(width)
+        .selected_text(egui::RichText::new(names[current]).color(TEXT))
+        .show_ui(ui, |ui| {
+            for (i, name) in names.iter().enumerate() {
+                if ui.selectable_label(i == current, *name).clicked() {
+                    set(setter, param, T::from_index(i));
+                }
+            }
+        });
 }
 
 /// Small square toggle for Mute / Solo, lit in `color` when on.

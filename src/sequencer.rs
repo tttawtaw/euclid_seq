@@ -212,22 +212,42 @@ pub fn scale_note(root: i32, degree: i32, scale: Scale) -> u8 {
 }
 
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+/// Saved by stable id (not position), so the list can be reordered without
+/// changing saved projects. Projects saved before ids existed are migrated in
+/// `EuclidSeq::filter_state` using `RAMP_MODE_LEGACY_ORDER`.
 pub enum RampMode {
+    #[id = "off"]
     #[name = "Off"]
     Off,
+    #[id = "up"]
     #[name = "Up"]
     Up,
+    #[id = "down"]
     #[name = "Down"]
     Down,
-    #[name = "Random"]
-    Random,
+    /// Up then back down across the ramp length, like a triangle wave.
+    #[id = "updown"]
+    #[name = "Up-Down"]
+    UpDown,
+    /// Down then back up.
+    #[id = "downup"]
+    #[name = "Down-Up"]
+    DownUp,
     /// Up, up, down, repeating: climbs one scale step every three notes.
+    #[id = "climb"]
     #[name = "Climb"]
     Climb,
     /// Down, down, up, repeating.
+    #[id = "descend"]
     #[name = "Descend"]
     Descend,
+    #[id = "random"]
+    #[name = "Random"]
+    Random,
 }
+
+/// The order ramp modes had (and were saved by position in) before v0.8.
+pub const RAMP_MODE_LEGACY_ORDER: [&str; 6] = ["off", "up", "down", "random", "climb", "descend"];
 
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RampRange {
@@ -322,10 +342,14 @@ impl Ramp {
         let (lo, hi) = self.bounds(scale);
         let t = if length > 1 { step as f64 / (length - 1) as f64 } else { 0.0 };
         let sweep = (t * (hi - lo) as f64).round() as i32;
+        // Triangle: 0 at both ends, 1 in the middle.
+        let tri = ((1.0 - (2.0 * t - 1.0).abs()) * (hi - lo) as f64).round() as i32;
         match self.mode {
             RampMode::Off => 0,
             RampMode::Up => lo + sweep,
             RampMode::Down => hi - sweep,
+            RampMode::UpDown => lo + tri,
+            RampMode::DownUp => hi - tri,
             RampMode::Random => {
                 let r = splitmix64(((self.seed as u64) << 32) | step as u64);
                 lo + (r % (hi - lo + 1) as u64) as i32
@@ -643,6 +667,27 @@ mod tests {
         assert_eq!(Rate::N16.step_beats(false), 0.25);
         assert_eq!(Rate::N8.step_beats(true), 0.75);
         assert_eq!(Rate::X4.step_beats(false), 16.0);
+    }
+
+    #[test]
+    fn triangle_ramps() {
+        let up_down = ramp(RampMode::UpDown, 1, false); // Major: 0..=7
+        assert_eq!(degrees(up_down, 5, Scale::Major), vec![0, 4, 7, 4, 0]);
+        let down_up = ramp(RampMode::DownUp, 1, false);
+        assert_eq!(degrees(down_up, 5, Scale::Major), vec![7, 3, 0, 3, 7]);
+        // Bipolar: from the bottom of the range to the top and back.
+        let bi = ramp(RampMode::UpDown, 1, true);
+        assert_eq!(degrees(bi, 3, Scale::Major), vec![-7, 7, -7]);
+        assert!(!up_down.per_note());
+    }
+
+    #[test]
+    fn ramp_mode_ids_cover_legacy_order() {
+        let ids = RampMode::ids().expect("ramp modes have stable ids");
+        for legacy in RAMP_MODE_LEGACY_ORDER {
+            assert!(ids.contains(&legacy), "{legacy}");
+        }
+        assert_eq!(*ids.last().unwrap(), "random", "Random is last in the list");
     }
 
     #[test]

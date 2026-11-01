@@ -70,6 +70,11 @@ pub struct EuclidSeqParams {
     #[id = "g_root"]
     pub global_root: IntParam,
 
+    /// Global octave (C3 = 60 convention, 0-6). Setting it in the GUI puts
+    /// every track's root in that octave, keeping its note name.
+    #[id = "g_octave"]
+    pub global_octave: IntParam,
+
     /// Global scale. Setting it in the GUI copies it to every track.
     #[id = "g_scale"]
     pub global_scale: EnumParam<Scale>,
@@ -275,7 +280,7 @@ impl TrackParams {
             probability: IntParam::new(name("Probability"), 100, IntRange::Linear { min: 0, max: 100 }).with_unit("%"),
             rotate: IntParam::new(name("Rotate"), 0, IntRange::Linear { min: -16, max: 16 })
                 .with_value_to_string(Arc::new(|v| format!("{v:+}"))),
-            pitch: IntParam::new(name("Pitch"), 0, IntRange::Linear { min: -14, max: 14 })
+            pitch: IntParam::new(name("Pitch"), 0, IntRange::Linear { min: -48, max: 48 })
                 .with_value_to_string(Arc::new(|v| format!("{v:+}"))),
             scale: EnumParam::new(name("Scale"), Scale::Minor),
             root: IntParam::new(name("Root"), root, IntRange::Linear { min: 24, max: 96 })
@@ -437,6 +442,7 @@ impl Default for EuclidSeqParams {
                 }))
                 .non_automatable(),
             global_scale: EnumParam::new("Global Scale", Scale::Minor).non_automatable(),
+            global_octave: IntParam::new("Global Octave", 3, IntRange::Linear { min: 0, max: 6 }).non_automatable(),
             tracks: std::array::from_fn(TrackParams::new),
         }
     }
@@ -512,6 +518,11 @@ impl Plugin for EuclidSeq {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    /// Migrate projects saved by older versions.
+    fn filter_state(state: &mut PluginState) {
+        migrate_ramp_modes(state);
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
@@ -643,6 +654,22 @@ impl Plugin for EuclidSeq {
     }
 }
 
+/// Before v0.8 the ramp mode was saved by its position in the list. The list
+/// has since been reordered and given stable ids, so translate old positions
+/// to ids: a track saved with "Random" still loads as Random.
+fn migrate_ramp_modes(state: &mut PluginState) {
+    use nih_plug::wrapper::state::ParamValue;
+    for t in 1..=NUM_TRACKS {
+        if let Some(value) = state.params.get_mut(&format!("ramp_{t}")) {
+            if let ParamValue::I32(index) = *value {
+                if let Some(id) = sequencer::RAMP_MODE_LEGACY_ORDER.get(index as usize) {
+                    *value = ParamValue::String((*id).to_string());
+                }
+            }
+        }
+    }
+}
+
 impl ClapPlugin for EuclidSeq {
     const CLAP_ID: &'static str = "com.thomasverney.euclid-seq";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("4-track euclidean MIDI step sequencer");
@@ -655,6 +682,33 @@ impl Vst3Plugin for EuclidSeq {
     const VST3_CLASS_ID: [u8; 16] = *b"EuclidSeqTVerney";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Instrument, Vst3SubCategory::Tools];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nih_plug::wrapper::state::ParamValue;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn old_ramp_modes_migrate_by_name() {
+        let mut params = BTreeMap::new();
+        params.insert("ramp_1".to_string(), ParamValue::I32(3)); // old "Random"
+        params.insert("ramp_2".to_string(), ParamValue::I32(4)); // old "Climb"
+        params.insert("ramp_3".to_string(), ParamValue::String("updown".into())); // already new
+        params.insert("pitch_1".to_string(), ParamValue::I32(3)); // untouched
+        let mut state = PluginState { version: "0.7.0".into(), params, fields: BTreeMap::new() };
+        migrate_ramp_modes(&mut state);
+        let get = |k: &str| match &state.params[k] {
+            ParamValue::String(s) => s.clone(),
+            ParamValue::I32(i) => i.to_string(),
+            _ => unreachable!(),
+        };
+        assert_eq!(get("ramp_1"), "random");
+        assert_eq!(get("ramp_2"), "climb");
+        assert_eq!(get("ramp_3"), "updown");
+        assert_eq!(get("pitch_1"), "3");
+    }
 }
 
 nih_export_clap!(EuclidSeq);

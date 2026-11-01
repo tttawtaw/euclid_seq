@@ -49,15 +49,16 @@ Long gates let notes overlap, up to 32 per track; past that, the oldest is relea
 
 | Control | Range | What it does |
 |---|---|---|
-| Pitch | −14…+14 | Transposition in **scale degrees**, so the sequence always stays in key. |
+| Pitch | −48…+48 | Transposition in **scale degrees**, so the sequence always stays in key. |
 | Root | C0–C6 | Root note (MIDI 60 = C3, the Ableton/Bitwig convention). Type a value like `F#2` or `54`. |
+| Octave − / + | 0–6 | Moves the root by whole octaves, keeping the note (scroll works too). |
 | Scale | 8 scales | Major, Minor, Dorian, Mixolydian, Harmonic Minor, Major Pentatonic, Minor Pentatonic, Chromatic. |
 
 **Pitch ramp** – gives each step its own pitch, always locked to the scale.
 
 | Control | Options | What it does |
 |---|---|---|
-| Mode | Off / Up / Down / Random / Climb / Descend | Up and Down sweep across the whole sequence; Random gives every step a fixed random note. Climb goes up, up, down, repeating (Descend: down, down, up), and wraps back around at the edge of the range. |
+| Mode (dropdown) | Off, Up, Down, Up-Down, Down-Up, Climb, Descend, Random | Up and Down sweep across the ramp; Up-Down and Down-Up go there and back like a triangle wave; Climb goes up, up, down, repeating (Descend: down, down, up) and wraps at the edge of the range; Random gives every step a fixed random note. Still an ordinary automatable parameter. |
 | Range | 1 / 2 / 4 oct | How far the ramp reaches. |
 | Range ST | −36…+36 semitones | A custom range instead of 1/2/4 octaves: turning the knob selects it (dimmed when not in use); clicking 1/2/4 goes back to octaves. Positive reaches above the root, negative below it, and ± polarity uses both sides. It stays in key: the ramp goes to the highest scale note within that many semitones (+7 in Minor = C up to G). |
 | Polarity | + / ± | `+` goes from the root upwards; `±` spans below and above the root. |
@@ -91,6 +92,7 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 | Control | What it does |
 |---|---|
 | Root | The key (C … B). Changing it moves every track to that key, **keeping each track's octave**, so a bass track stays low. |
+| Octave − / + | Puts every track's root in that octave, keeping each track's note. This brings all tracks into the same register; use a track's own Octave to move it back. |
 | Scale | Changing it sets every track to that scale. |
 | Following | Lit for each track that still matches the global key and scale. |
 
@@ -155,6 +157,7 @@ cargo test --lib
 ## Known notes
 
 - The window size is no longer saved in projects. Earlier versions saved it, which could make projects from an older version open the window too small for newer controls.
+- v0.8 reordered the ramp modes (Random is now last). Projects saved with older versions are translated on load, so their ramp modes are unchanged.
 - v0.2 changed every parameter ID (they now carry a `_1`…`_4` track suffix), so projects saved with v0.1 open with default settings.
 
 - `clap-validator` 0.4.1 reports failures in the `state-reproducibility-*` and `state-invalid-random` tests. nih-plug's own reference `gain` example fails the same four tests with the same validator, so this is a framework/validator interaction rather than something in this plugin; all processing, parameter and transport tests pass.
