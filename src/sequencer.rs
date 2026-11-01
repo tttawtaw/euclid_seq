@@ -86,12 +86,15 @@ pub fn euclid(steps: usize, pulses: usize) -> [bool; MAX_STEPS] {
 
 /// The playable pattern over the full sequence length. The euclidean pattern
 /// repeats every `euclid_steps` and restarts when the sequence wraps at `length`.
-pub fn pattern(length: usize, euclid_steps: usize, pulses: usize) -> [bool; MAX_STEPS] {
+/// `rotate` shifts the euclidean cycle right (positive) or left (negative),
+/// wrapping around inside the cycle.
+pub fn pattern(length: usize, euclid_steps: usize, pulses: usize, rotate: i32) -> [bool; MAX_STEPS] {
     let e = euclid(euclid_steps, pulses);
-    let cycle = euclid_steps.clamp(1, MAX_STEPS);
+    let cycle = euclid_steps.clamp(1, MAX_STEPS) as i32;
     let mut out = [false; MAX_STEPS];
     for (i, slot) in out.iter_mut().enumerate().take(length.min(MAX_STEPS)) {
-        *slot = e[i % cycle];
+        let pos = (i as i32 % cycle - rotate).rem_euclid(cycle);
+        *slot = e[pos as usize];
     }
     out
 }
@@ -112,10 +115,12 @@ pub enum Scale {
     MajorPentatonic,
     #[name = "Minor Pentatonic"]
     MinorPentatonic,
+    #[name = "Chromatic"]
+    Chromatic,
 }
 
 impl Scale {
-    pub const ALL: [Scale; 7] = [
+    pub const ALL: [Scale; 8] = [
         Scale::Major,
         Scale::Minor,
         Scale::Dorian,
@@ -123,6 +128,7 @@ impl Scale {
         Scale::HarmonicMinor,
         Scale::MajorPentatonic,
         Scale::MinorPentatonic,
+        Scale::Chromatic,
     ];
 
     pub fn intervals(self) -> &'static [i32] {
@@ -134,6 +140,7 @@ impl Scale {
             Scale::HarmonicMinor => &[0, 2, 3, 5, 7, 8, 11],
             Scale::MajorPentatonic => &[0, 2, 4, 7, 9],
             Scale::MinorPentatonic => &[0, 3, 5, 7, 10],
+            Scale::Chromatic => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         }
     }
 
@@ -146,6 +153,7 @@ impl Scale {
             Scale::HarmonicMinor => "Harmonic Minor",
             Scale::MajorPentatonic => "Major Pentatonic",
             Scale::MinorPentatonic => "Minor Pentatonic",
+            Scale::Chromatic => "Chromatic",
         }
     }
 }
@@ -157,6 +165,88 @@ pub fn scale_note(root: i32, degree: i32, scale: Scale) -> u8 {
     let octave = degree.div_euclid(len);
     let idx = degree.rem_euclid(len) as usize;
     (root + octave * 12 + iv[idx]).clamp(0, 127) as u8
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RampMode {
+    #[name = "Off"]
+    Off,
+    #[name = "Up"]
+    Up,
+    #[name = "Down"]
+    Down,
+    #[name = "Random"]
+    Random,
+}
+
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RampRange {
+    #[name = "1 Oct"]
+    One,
+    #[name = "2 Oct"]
+    Two,
+    #[name = "4 Oct"]
+    Four,
+}
+
+impl RampRange {
+    pub const ALL: [RampRange; 3] = [RampRange::One, RampRange::Two, RampRange::Four];
+
+    pub fn octaves(self) -> i32 {
+        match self {
+            RampRange::One => 1,
+            RampRange::Two => 2,
+            RampRange::Four => 4,
+        }
+    }
+}
+
+/// Everything that shapes the per-step pitch ramp of one track.
+#[derive(Debug, Clone, Copy)]
+pub struct Ramp {
+    pub mode: RampMode,
+    pub octaves: i32,
+    pub bipolar: bool,
+    pub seed: u32,
+}
+
+impl Ramp {
+    /// Lowest and highest scale degree the ramp can reach. Working in scale
+    /// degrees (not semitones) is what keeps every ramp note in key.
+    pub fn bounds(&self, scale: Scale) -> (i32, i32) {
+        let span = self.octaves * scale.intervals().len() as i32;
+        if self.bipolar {
+            (-span, span)
+        } else {
+            (0, span)
+        }
+    }
+
+    /// Scale-degree offset for `step` in a sequence of `length` steps.
+    /// Up/Down sweep linearly across the whole sequence; Random picks a fixed
+    /// degree per step from the seed, so the melody repeats until re-rolled.
+    pub fn degree(&self, step: usize, length: usize, scale: Scale) -> i32 {
+        let (lo, hi) = self.bounds(scale);
+        let t = if length > 1 { step as f64 / (length - 1) as f64 } else { 0.0 };
+        let sweep = (t * (hi - lo) as f64).round() as i32;
+        match self.mode {
+            RampMode::Off => 0,
+            RampMode::Up => lo + sweep,
+            RampMode::Down => hi - sweep,
+            RampMode::Random => {
+                let r = splitmix64(((self.seed as u64) << 32) | step as u64);
+                lo + (r % (hi - lo + 1) as u64) as i32
+            }
+        }
+    }
+}
+
+/// Small, fast, well-mixed hash; deterministic across platforms.
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -189,7 +279,11 @@ mod tests {
     use super::*;
 
     fn bits(len: usize, steps: usize, pulses: usize) -> String {
-        pattern(len, steps, pulses)[..len]
+        rotated(len, steps, pulses, 0)
+    }
+
+    fn rotated(len: usize, steps: usize, pulses: usize, rot: i32) -> String {
+        pattern(len, steps, pulses, rot)[..len]
             .iter()
             .map(|&b| if b { 'x' } else { '.' })
             .collect()
@@ -208,6 +302,20 @@ mod tests {
     #[test]
     fn euclid_repeats_within_length() {
         assert_eq!(bits(8, 3, 1), "x..x..x.");
+    }
+
+    #[test]
+    fn rotation_shifts_within_the_cycle() {
+        assert_eq!(rotated(8, 8, 3, 1), ".x..x..x"); // right
+        assert_eq!(rotated(8, 8, 3, -1), "..x..x.x"); // left
+        assert_eq!(rotated(8, 8, 3, 8), "x..x..x."); // full turn
+        assert_eq!(rotated(8, 8, 3, -9), rotated(8, 8, 3, -1));
+        // In a polymeter the shift stays inside each euclidean cycle.
+        assert_eq!(rotated(8, 3, 1, 1), ".x..x..x");
+        // Rotation never changes the number of hits.
+        for r in -31..=31 {
+            assert_eq!(rotated(16, 16, 5, r).matches('x').count(), 5);
+        }
     }
 
     #[test]
@@ -264,6 +372,60 @@ mod tests {
         assert_eq!(scale_note(60, -1, Scale::Major), 59);
         assert_eq!(scale_note(60, 5, Scale::MinorPentatonic), 72);
         assert_eq!(scale_note(126, 14, Scale::Major), 127);
+        // Chromatic: one degree = one semitone.
+        assert_eq!(scale_note(60, 1, Scale::Chromatic), 61);
+        assert_eq!(scale_note(60, -13, Scale::Chromatic), 47);
+        assert_eq!(Ramp { mode: RampMode::Up, octaves: 2, bipolar: false, seed: 0 }.bounds(Scale::Chromatic), (0, 24));
+    }
+
+    fn ramp(mode: RampMode, octaves: i32, bipolar: bool) -> Ramp {
+        Ramp { mode, octaves, bipolar, seed: 1 }
+    }
+
+    fn degrees(r: Ramp, len: usize, scale: Scale) -> Vec<i32> {
+        (0..len).map(|i| r.degree(i, len, scale)).collect()
+    }
+
+    #[test]
+    fn ramp_up_and_down() {
+        let up = ramp(RampMode::Up, 1, false);
+        assert_eq!(degrees(up, 8, Scale::Major), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let down = ramp(RampMode::Down, 1, false);
+        assert_eq!(degrees(down, 8, Scale::Major), vec![7, 6, 5, 4, 3, 2, 1, 0]);
+        // Bipolar spans -range..+range; pentatonic has 5 degrees per octave.
+        let bi = ramp(RampMode::Up, 1, true);
+        assert_eq!(degrees(bi, 11, Scale::MinorPentatonic), (-5..=5).collect::<Vec<_>>());
+        // Off never moves; a single-step sequence stays on the start value.
+        assert_eq!(degrees(ramp(RampMode::Off, 4, true), 16, Scale::Major), vec![0; 16]);
+        assert_eq!(degrees(up, 1, Scale::Major), vec![0]);
+    }
+
+    #[test]
+    fn ramp_endpoints_hit_the_range() {
+        for oct in [1, 2, 4] {
+            for bip in [false, true] {
+                let r = ramp(RampMode::Up, oct, bip);
+                let (lo, hi) = r.bounds(Scale::Dorian);
+                let d = degrees(r, 16, Scale::Dorian);
+                assert_eq!((d[0], d[15]), (lo, hi));
+                assert_eq!(hi, oct * 7);
+                // Notes land exactly `oct` octaves above the root.
+                assert_eq!(scale_note(48, hi, Scale::Dorian) as i32, 48 + 12 * oct);
+            }
+        }
+    }
+
+    #[test]
+    fn ramp_random_is_bounded_deterministic_and_reseedable() {
+        let r = ramp(RampMode::Random, 2, true);
+        let a = degrees(r, 32, Scale::Minor);
+        assert!(a.iter().all(|&d| (-14..=14).contains(&d)));
+        assert_eq!(a, degrees(r, 32, Scale::Minor));
+        let b = degrees(Ramp { seed: 2, ..r }, 32, Scale::Minor);
+        assert_ne!(a, b);
+        // Not degenerate: uses a good part of the range.
+        let distinct: std::collections::HashSet<_> = a.iter().collect();
+        assert!(distinct.len() >= 10, "{a:?}");
     }
 
     #[test]
