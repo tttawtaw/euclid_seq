@@ -1,17 +1,19 @@
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
 mod editor;
 pub mod sequencer;
 
 use sequencer::{
-    apply_overrides, note_name, parse_note_name, pattern, ramp_velocity, scale_note, Ramp, RampMode,
+    apply_overrides, note_name, parse_note_name, pattern, ramp_velocity, scale_note, song_note_index, Ramp, RampMode,
     RampRange, Rate, Scale, VelocityMode, MAX_STEPS,
 };
 
 pub const NUM_TRACKS: usize = 4;
+/// Playhead value meaning "transport stopped".
+pub const STOPPED: i64 = i64::MIN;
 /// Room for every note on/off of all tracks in one block, even at 1/64.
 const MAX_EVENTS: usize = 1024;
 
@@ -37,8 +39,9 @@ struct Pending {
 
 pub struct EuclidSeq {
     params: Arc<EuclidSeqParams>,
-    /// Step under the playhead for each track (-1 when stopped), read by the GUI.
-    playheads: Arc<[AtomicI32; NUM_TRACKS]>,
+    /// Global step under the playhead for each track (steps since beat 0, so
+    /// the GUI can tell which loop it is in), or STOPPED.
+    playheads: Arc<[AtomicI64; NUM_TRACKS]>,
     /// The note each track is holding, so it is always released with exactly
     /// what was sent, even if pitch, channel or rate changed meanwhile.
     held: [Option<Held>; NUM_TRACKS],
@@ -144,7 +147,8 @@ pub struct TrackParams {
     #[id = "vel_high"]
     pub vel_high: IntParam,
 
-    /// Notes per velocity ramp; capped at the number of notes in the pattern.
+    /// Notes per velocity ramp (1-16). Independent of the pattern's note count:
+    /// the ramp keeps counting across loops.
     #[id = "vel_length"]
     pub vel_length: IntParam,
 
@@ -205,7 +209,7 @@ impl TrackParams {
             vel_mode: EnumParam::new(name("Velocity Ramp"), VelocityMode::Off),
             vel_low: IntParam::new(name("Velocity Low"), 40, IntRange::Linear { min: 0, max: 127 }),
             vel_high: IntParam::new(name("Velocity High"), 110, IntRange::Linear { min: 0, max: 127 }),
-            vel_length: IntParam::new(name("Velocity Length"), 4, IntRange::Linear { min: 1, max: 32 }),
+            vel_length: IntParam::new(name("Velocity Length"), 4, IntRange::Linear { min: 1, max: 16 }),
             added: AtomicU32::new(0),
             removed: AtomicU32::new(0),
         }
@@ -249,19 +253,16 @@ impl TrackParams {
         p
     }
 
-    /// Velocity (0-127) of the note on `step` of `pattern`.
-    pub fn step_velocity(&self, step: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
+    /// Velocity (0-127) of the note at `global_step` (steps since beat 0).
+    pub fn step_velocity(&self, global_step: i64, pattern: &[bool; MAX_STEPS]) -> i32 {
         let len = self.length.value() as usize;
-        let note_index = pattern[..step.min(len)].iter().filter(|&&h| h).count();
-        let total = pattern[..len].iter().filter(|&&h| h).count();
         ramp_velocity(
             self.velocity.value(),
             self.vel_mode.value(),
             self.vel_low.value(),
             self.vel_high.value(),
             self.vel_length.value() as usize,
-            note_index,
-            total,
+            song_note_index(global_step, len, pattern),
         )
     }
 
@@ -323,7 +324,7 @@ impl Default for EuclidSeq {
     fn default() -> Self {
         Self {
             params: Arc::new(EuclidSeqParams::default()),
-            playheads: Arc::new(std::array::from_fn(|_| AtomicI32::new(-1))),
+            playheads: Arc::new(std::array::from_fn(|_| AtomicI64::new(STOPPED))),
             held: [None; NUM_TRACKS],
             last_end_beat: None,
             events: Vec::with_capacity(MAX_EVENTS),
@@ -383,7 +384,7 @@ impl Plugin for EuclidSeq {
         self.held = [None; NUM_TRACKS];
         self.last_end_beat = None;
         for p in self.playheads.iter() {
-            p.store(-1, Ordering::Relaxed);
+            p.store(STOPPED, Ordering::Relaxed);
         }
     }
 
@@ -403,7 +404,7 @@ impl Plugin for EuclidSeq {
                 self.release_all_now(context);
                 self.last_end_beat = None;
                 for p in self.playheads.iter() {
-                    p.store(-1, Ordering::Relaxed);
+                    p.store(STOPPED, Ordering::Relaxed);
                 }
                 return ProcessStatus::Normal;
             }
@@ -440,7 +441,7 @@ impl Plugin for EuclidSeq {
                 let step = k.rem_euclid(length) as usize;
                 if on && pattern[step] {
                     let note = track.step_note(step, &pattern);
-                    let velocity = track.step_velocity(step, &pattern) as f32 / 127.0;
+                    let velocity = track.step_velocity(k, &pattern) as f32 / 127.0;
                     let channel = (track.channel.value() - 1) as u8;
                     self.push(timing(beat), true, note, channel, velocity);
                     self.held[t] = Some(Held { note, channel, off_beat: beat + gate });
@@ -457,7 +458,7 @@ impl Plugin for EuclidSeq {
 
             // Playhead for the GUI: the step sounding at the end of this block.
             let last = ((end_beat - beats_per_sample) / step_beats).floor() as i64;
-            self.playheads[t].store(last.rem_euclid(length) as i32, Ordering::Relaxed);
+            self.playheads[t].store(last, Ordering::Relaxed);
         }
 
         // Hosts need events in time order; seq keeps same-sample order stable.

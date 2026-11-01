@@ -58,9 +58,9 @@ Up, Down and Random are tied to step positions, not to hits. So Rotate, Pulses a
 | Velocity | 0–127 (default 75) | Fixed velocity, used when the ramp is off or its length is 1. 0 is silent (MIDI treats it as a note-off). |
 | Mode | Off / Up / Down | Ramp from Low to High (Up) or High to Low (Down). |
 | Low / High | 0–127 | The two values the ramp moves between. |
-| Length | 1 … notes in pattern | Notes per ramp before it starts again. 2 alternates Low/High; 1 = fixed Velocity. Capped at the number of notes in the pattern (the knob shows the length in use). |
+| Length | 1–16 | Notes per ramp before it starts again. 2 alternates Low/High; 1 = fixed Velocity. Not tied to the pattern: it can be longer than the number of notes. |
 
-The velocity ramp counts *notes*, not steps, and restarts at the top of each sequence loop. Each hit shows its velocity as a bar along the bottom of its cell.
+The velocity ramp counts *notes*, not steps, and keeps counting across sequence loops. When Length differs from the number of notes in the pattern, the velocities drift against the rhythm and only line up again after several loops. That's deliberate, and it keeps a repeating pattern moving. It's worked out from the song position, so the same spot in your song always gets the same velocities. Each hit shows its velocity for the loop currently playing as a bar along the bottom of its cell.
 
 **Editing steps by hand**
 

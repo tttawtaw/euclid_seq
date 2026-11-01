@@ -5,11 +5,11 @@ use nih_plug_egui::egui::{
 };
 use nih_plug_egui::{create_egui_editor, EguiState};
 use std::f32::consts::PI;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::sequencer::{note_name, toggle_override, Rate, RampMode, RampRange, Scale, MAX_STEPS};
-use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS};
+use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS, STOPPED};
 
 const WIDTH: u32 = 950;
 const HEIGHT: u32 = 500;
@@ -30,7 +30,16 @@ const KNOB_H: f32 = 92.0;
 /// Vertical centre of a knob's dial, relative to the top of its rect.
 const DIAL_Y: f32 = 34.0;
 
-type Playheads = Arc<[AtomicI32; NUM_TRACKS]>;
+type Playheads = Arc<[AtomicI64; NUM_TRACKS]>;
+
+/// (step within the sequence, loop number) for a track, or (-1, 0) when stopped.
+fn split_playhead(track: &TrackParams, global: i64) -> (i32, i64) {
+    if global == STOPPED {
+        return (-1, 0);
+    }
+    let len = track.length.value() as i64;
+    (global.rem_euclid(len) as i32, global.div_euclid(len))
+}
 
 pub fn default_state() -> Arc<EguiState> {
     EguiState::from_size(WIDTH, HEIGHT)
@@ -60,9 +69,9 @@ pub fn create(params: Arc<EuclidSeqParams>, playheads: Playheads) -> Option<Box<
                 .show(ctx, |ui| {
                     top_bar(ui, &params, setter, &playheads, &mut state.page);
                     let track = &params.tracks[state.page];
-                    let playhead = playheads[state.page].load(Ordering::Relaxed);
+                    let (playhead, loop_idx) = split_playhead(track, playheads[state.page].load(Ordering::Relaxed));
                     ui.add_space(14.0);
-                    step_grid(ui, track, setter, playhead);
+                    step_grid(ui, track, setter, playhead, loop_idx);
                     ui.add_space(16.0);
                     controls(ui, &params, track, setter, state.page);
                 });
@@ -119,7 +128,7 @@ fn top_bar(
                 FontId::monospace(13.0),
                 text_color,
             );
-            let dot = if is_firing(track, playheads[t].load(Ordering::Relaxed)) {
+            let dot = if is_firing(track, split_playhead(track, playheads[t].load(Ordering::Relaxed)).0) {
                 ACCENT
             } else if track.on.value() {
                 ACCENT_DIM
@@ -166,7 +175,10 @@ fn top_bar(
 /// Two rows of 16 cells. Cells past the sequence length are dimmed; clicking a
 /// cell sets the sequence length to end on it. With a ramp active, each step
 /// shows its pitch as a short line (higher line = higher note).
-fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i32) {
+/// `loop_idx` is which pass through the sequence is playing; velocity ramps
+/// longer than the pattern differ from loop to loop, so the grid shows the
+/// current one.
+fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i32, loop_idx: i64) {
     let length = track.length.value() as usize;
     let e_steps = track.effective_euclid_steps();
     let pattern = track.current_pattern();
@@ -226,7 +238,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
 
         // Velocity: a bar along the bottom of each hit, as wide as it is loud.
         if hit {
-            let vel = track.step_velocity(i, &pattern) as f32 / 127.0;
+            let vel = track.step_velocity(loop_idx * length as i64 + i as i64, &pattern) as f32 / 127.0;
             let w = (cell - 10.0) * vel;
             let bar = Rect::from_min_size(pos2(rect.left() + 5.0, rect.bottom() - 6.0), vec2(w.max(1.0), 2.5));
             painter.rect_filled(bar, CornerRadius::ZERO, BG);
@@ -267,7 +279,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
         let hover = if active {
             let note = note_name(track.step_note(i, &pattern) as i32);
             let what = if hit {
-                format!("{} · velocity {}", note, track.step_velocity(i, &pattern))
+                format!("{} · velocity {}", note, track.step_velocity(loop_idx * length as i64 + i as i64, &pattern))
             } else {
                 format!("{} (rest)", note)
             };
@@ -373,10 +385,7 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
                 knob(ui, setter, &track.vel_mode, "MODE", mode);
                 knob(ui, setter, &track.vel_low, "LOW", KnobStyle::typeable());
                 knob(ui, setter, &track.vel_high, "HIGH", KnobStyle::typeable());
-                // Show the length actually used: capped at the notes in the pattern.
-                let used = (track.vel_length.value() as usize).min(track.note_count()).max(1);
-                let length = KnobStyle { text: Some(used.to_string()), ..KnobStyle::typeable() };
-                knob(ui, setter, &track.vel_length, "LENGTH", length);
+                knob(ui, setter, &track.vel_length, "LENGTH", KnobStyle::typeable());
             });
         });
 

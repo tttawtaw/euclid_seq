@@ -346,31 +346,33 @@ pub enum VelocityMode {
     Down,
 }
 
-/// Velocity for the `note_index`-th note (0-based, counted from the start of the
-/// sequence) out of `total_notes` notes in the pattern.
+/// Velocity for the `note_index`-th note counted from the start of the song
+/// (it keeps counting across sequence loops, so a ramp longer than the
+/// pattern drifts against it instead of restarting every loop).
 ///
 /// The ramp runs from `low` to `high` (Up) or `high` to `low` (Down) over
-/// `length` notes, then starts again. `length` is clamped to the number of
-/// notes in the pattern; a length of 1 (or mode Off) gives the fixed `base`.
-pub fn ramp_velocity(
-    base: i32,
-    mode: VelocityMode,
-    low: i32,
-    high: i32,
-    length: usize,
-    note_index: usize,
-    total_notes: usize,
-) -> i32 {
-    let n = length.min(total_notes);
-    if mode == VelocityMode::Off || n <= 1 {
+/// `length` notes, then starts again. A length of 1 (or mode Off) gives the
+/// fixed `base`.
+pub fn ramp_velocity(base: i32, mode: VelocityMode, low: i32, high: i32, length: usize, note_index: i64) -> i32 {
+    if mode == VelocityMode::Off || length <= 1 {
         return base;
     }
-    let t = (note_index % n) as f64 / (n - 1) as f64;
+    let t = note_index.rem_euclid(length as i64) as f64 / (length - 1) as f64;
     let (from, to) = match mode {
         VelocityMode::Up => (low, high),
         _ => (high, low),
     };
     from + (t * (to - from) as f64).round() as i32
+}
+
+/// How many notes have played since the song start (beat 0) before global step
+/// `global_step`, for a sequence of `length` steps playing `pattern`.
+pub fn song_note_index(global_step: i64, length: usize, pattern: &[bool; MAX_STEPS]) -> i64 {
+    let len = length.clamp(1, MAX_STEPS);
+    let per_loop = pattern[..len].iter().filter(|&&h| h).count() as i64;
+    let loops = global_step.div_euclid(len as i64);
+    let step = global_step.rem_euclid(len as i64) as usize;
+    loops * per_loop + pattern[..step].iter().filter(|&&h| h).count() as i64
 }
 
 /// Small, fast, well-mixed hash; deterministic across platforms.
@@ -588,20 +590,33 @@ mod tests {
 
     #[test]
     fn velocity_ramp() {
-        let v = |mode, len, i, total| ramp_velocity(75, mode, 40, 100, len, i, total);
-        let up: Vec<_> = (0..8).map(|i| v(VelocityMode::Up, 4, i, 8)).collect();
+        let v = |mode, len, i| ramp_velocity(75, mode, 40, 100, len, i);
+        let up: Vec<_> = (0..8).map(|i| v(VelocityMode::Up, 4, i)).collect();
         assert_eq!(up, vec![40, 60, 80, 100, 40, 60, 80, 100]);
-        let down: Vec<_> = (0..4).map(|i| v(VelocityMode::Down, 4, i, 8)).collect();
+        let down: Vec<_> = (0..4).map(|i| v(VelocityMode::Down, 4, i)).collect();
         assert_eq!(down, vec![100, 80, 60, 40]);
         // Length 2 alternates between the two values.
-        let alt: Vec<_> = (0..4).map(|i| v(VelocityMode::Up, 2, i, 5)).collect();
+        let alt: Vec<_> = (0..4).map(|i| v(VelocityMode::Up, 2, i)).collect();
         assert_eq!(alt, vec![40, 100, 40, 100]);
         // Length 1 or Off: fixed at the base velocity.
-        assert_eq!(v(VelocityMode::Up, 1, 3, 8), 75);
-        assert_eq!(v(VelocityMode::Off, 4, 3, 8), 75);
-        // Length is capped at the number of notes in the pattern.
-        let capped: Vec<_> = (0..3).map(|i| v(VelocityMode::Up, 32, i, 3)).collect();
-        assert_eq!(capped, vec![40, 70, 100]);
+        assert_eq!(v(VelocityMode::Up, 1, 3), 75);
+        assert_eq!(v(VelocityMode::Off, 4, 3), 75);
+    }
+
+    #[test]
+    fn velocity_ramp_longer_than_pattern_drifts_across_loops() {
+        // 3 notes per loop (x..x..x.), ramp over 7 notes: the ramp keeps going
+        // into the next loops instead of restarting, and lines up again after
+        // 7 loops' worth of notes.
+        let p = pattern(8, 8, 3, 0);
+        let vels: Vec<_> = (0..24i64)
+            .filter(|&k| p[k.rem_euclid(8) as usize])
+            .map(|k| ramp_velocity(75, VelocityMode::Up, 40, 100, 7, song_note_index(k, 8, &p)))
+            .collect();
+        assert_eq!(vels, vec![40, 50, 60, 70, 80, 90, 100, 40, 50]);
+        // Notes before the song start (pre-roll) count backwards consistently.
+        assert_eq!(song_note_index(-8, 8, &p), -3);
+        assert_eq!(song_note_index(3, 8, &p), 1);
     }
 
     #[test]
