@@ -8,24 +8,61 @@ pub mod sequencer;
 
 use sequencer::{
     apply_overrides, note_name, parse_note_name, pattern, ramp_velocity, scale_note, Ramp, RampMode,
-    RampRange, Scale, VelocityMode, MAX_STEPS, STEPS_PER_BEAT,
+    RampRange, Rate, Scale, VelocityMode, MAX_STEPS,
 };
 
 pub const NUM_TRACKS: usize = 4;
+/// Room for every note on/off of all tracks in one block, even at 1/64.
+const MAX_EVENTS: usize = 1024;
+
+/// A note a track is holding: what was sent, and when it must stop.
+#[derive(Clone, Copy)]
+struct Held {
+    note: u8,
+    channel: u8,
+    off_beat: f64,
+}
+
+/// A note event waiting to be sent; `seq` keeps same-sample events in the
+/// order they were generated (note-off before the next note-on).
+#[derive(Clone, Copy)]
+struct Pending {
+    timing: u32,
+    seq: u32,
+    on: bool,
+    note: u8,
+    channel: u8,
+    velocity: f32,
+}
 
 pub struct EuclidSeq {
     params: Arc<EuclidSeqParams>,
     /// Step under the playhead for each track (-1 when stopped), read by the GUI.
     playheads: Arc<[AtomicI32; NUM_TRACKS]>,
-    /// The (note, channel) each track is holding, so it is always released with
-    /// exactly what was sent, even if pitch or channel changed meanwhile.
-    held: [Option<(u8, u8)>; NUM_TRACKS],
+    /// The note each track is holding, so it is always released with exactly
+    /// what was sent, even if pitch, channel or rate changed meanwhile.
+    held: [Option<Held>; NUM_TRACKS],
+    /// Where the previous block ended, to detect loops and jumps.
+    last_end_beat: Option<f64>,
+    /// Pre-allocated event buffer (never grows on the audio thread).
+    events: Vec<Pending>,
 }
 
 #[derive(Params)]
 pub struct EuclidSeqParams {
-    #[persist = "editor-state"]
+    /// Deliberately not persisted: a size saved by an older version would
+    /// reopen the window too small for newer controls.
     editor_state: Arc<EguiState>,
+
+    /// Global key (pitch class 0-11). Setting it in the GUI copies it to every
+    /// track, keeping each track's octave. Not automatable, because that copy
+    /// happens in the GUI.
+    #[id = "g_root"]
+    pub global_root: IntParam,
+
+    /// Global scale. Setting it in the GUI copies it to every track.
+    #[id = "g_scale"]
+    pub global_scale: EnumParam<Scale>,
 
     /// Parameter IDs get a `_1` … `_4` suffix per track.
     #[nested(array, group = "Track")]
@@ -56,6 +93,14 @@ pub struct TrackParams {
     /// Number of hits spread evenly over the euclidean cycle.
     #[id = "e_pulses"]
     pub euclid_pulses: IntParam,
+
+    /// How long each step lasts.
+    #[id = "rate"]
+    pub rate: EnumParam<Rate>,
+
+    /// Dotted steps last 1.5x as long.
+    #[id = "dotted"]
+    pub dotted: BoolParam,
 
     /// Shifts the euclidean pattern right (+) or left (-) within its cycle.
     #[id = "rotate"]
@@ -135,6 +180,8 @@ impl TrackParams {
                 pulses,
                 IntRange::Linear { min: 0, max: 32 },
             ),
+            rate: EnumParam::new(name("Rate"), Rate::N16),
+            dotted: BoolParam::new(name("Dotted"), false),
             rotate: IntParam::new(name("Rotate"), 0, IntRange::Linear { min: -16, max: 16 })
                 .with_value_to_string(Arc::new(|v| format!("{v:+}"))),
             pitch: IntParam::new(name("Pitch"), 0, IntRange::Linear { min: -14, max: 14 })
@@ -232,15 +279,24 @@ impl TrackParams {
         }
     }
 
-    /// Scale degree (relative to the root) played on `step`.
-    pub fn step_degree(&self, step: usize) -> i32 {
-        let ramp = self.ramp();
+    /// Scale degree (relative to the root) played on `step` of `pattern`.
+    pub fn step_degree(&self, step: usize, pattern: &[bool; MAX_STEPS]) -> i32 {
         let len = self.length.value() as usize;
-        self.pitch.value() + ramp.degree(step, len, self.scale.value())
+        let note_index = pattern[..step.min(len)].iter().filter(|&&h| h).count();
+        self.pitch.value() + self.ramp().degree(step, note_index, len, self.scale.value())
     }
 
-    pub fn step_note(&self, step: usize) -> u8 {
-        scale_note(self.root.value(), self.step_degree(step), self.scale.value())
+    pub fn step_note(&self, step: usize, pattern: &[bool; MAX_STEPS]) -> u8 {
+        scale_note(self.root.value(), self.step_degree(step, pattern), self.scale.value())
+    }
+
+    pub fn step_beats(&self) -> f64 {
+        self.rate.value().step_beats(self.dotted.value())
+    }
+
+    /// Does this track follow the global key and scale?
+    pub fn follows_global(&self, root_pc: i32, scale: Scale) -> bool {
+        self.root.value().rem_euclid(12) == root_pc && self.scale.value() == scale
     }
 }
 
@@ -248,6 +304,16 @@ impl Default for EuclidSeqParams {
     fn default() -> Self {
         Self {
             editor_state: editor::default_state(),
+            global_root: IntParam::new("Global Root", 0, IntRange::Linear { min: 0, max: 11 })
+                .with_value_to_string(Arc::new(|v| note_name(v).trim_end_matches(char::is_numeric).trim_end_matches('-').to_string()))
+                .with_string_to_value(Arc::new(|s| {
+                    // Accept "F#", "f#2" or a number; only the pitch class matters.
+                    let s = s.trim();
+                    let with_octave = if s.chars().last().is_some_and(|c| c.is_ascii_digit()) { s.to_string() } else { format!("{s}3") };
+                    parse_note_name(&with_octave).map(|n| n.rem_euclid(12))
+                }))
+                .non_automatable(),
+            global_scale: EnumParam::new("Global Scale", Scale::Minor).non_automatable(),
             tracks: std::array::from_fn(TrackParams::new),
         }
     }
@@ -259,26 +325,31 @@ impl Default for EuclidSeq {
             params: Arc::new(EuclidSeqParams::default()),
             playheads: Arc::new(std::array::from_fn(|_| AtomicI32::new(-1))),
             held: [None; NUM_TRACKS],
+            last_end_beat: None,
+            events: Vec::with_capacity(MAX_EVENTS),
         }
     }
 }
 
 impl EuclidSeq {
-    fn release(&mut self, track: usize, context: &mut impl ProcessContext<Self>, timing: u32) {
-        if let Some((note, channel)) = self.held[track].take() {
-            context.send_event(NoteEvent::NoteOff {
-                timing,
-                voice_id: None,
-                channel,
-                note,
-                velocity: 0.0,
-            });
+    fn push(&mut self, timing: u32, on: bool, note: u8, channel: u8, velocity: f32) {
+        if self.events.len() < MAX_EVENTS {
+            let seq = self.events.len() as u32;
+            self.events.push(Pending { timing, seq, on, note, channel, velocity });
         }
     }
 
-    fn release_all(&mut self, context: &mut impl ProcessContext<Self>, timing: u32) {
+    fn release_all_now(&mut self, context: &mut impl ProcessContext<Self>) {
         for t in 0..NUM_TRACKS {
-            self.release(t, context, timing);
+            if let Some(h) = self.held[t].take() {
+                context.send_event(NoteEvent::NoteOff {
+                    timing: 0,
+                    voice_id: None,
+                    channel: h.channel,
+                    note: h.note,
+                    velocity: 0.0,
+                });
+            }
         }
     }
 }
@@ -310,6 +381,7 @@ impl Plugin for EuclidSeq {
     fn reset(&mut self) {
         // The host will have flushed notes; just forget ours.
         self.held = [None; NUM_TRACKS];
+        self.last_end_beat = None;
         for p in self.playheads.iter() {
             p.store(-1, Ordering::Relaxed);
         }
@@ -328,7 +400,8 @@ impl Plugin for EuclidSeq {
         let (start_beat, tempo) = match (transport.playing, transport.pos_beats(), transport.tempo) {
             (true, Some(pos), Some(tempo)) if num_samples > 0 && tempo > 0.0 => (pos, tempo),
             _ => {
-                self.release_all(context, 0);
+                self.release_all_now(context);
+                self.last_end_beat = None;
                 for p in self.playheads.iter() {
                     p.store(-1, Ordering::Relaxed);
                 }
@@ -338,42 +411,63 @@ impl Plugin for EuclidSeq {
 
         let beats_per_sample = tempo / 60.0 / sample_rate;
         let end_beat = start_beat + beats_per_sample * num_samples as f64;
-        let params = self.params.clone();
+        let timing = |beat: f64| sequencer::beat_to_timing(beat, start_beat, beats_per_sample, num_samples);
 
-        // Even ticks start a step; odd ticks end the gate of the previous one.
-        // All tracks share the tick grid, so events stay in time order.
-        for (tick, timing) in sequencer::block_ticks(start_beat, beats_per_sample, num_samples) {
-            for (t, track) in params.tracks.iter().enumerate() {
-                // Always close the previous note before anything else happens.
-                self.release(t, context, timing);
-
-                if tick.rem_euclid(2) != 0 || !track.on.value() {
-                    continue;
-                }
-                let length = track.length.value() as i64;
-                let step = (tick / 2).rem_euclid(length) as usize;
-                let pattern = track.current_pattern();
-                if pattern[step] {
-                    let note = track.step_note(step);
-                    let velocity = track.step_velocity(step, &pattern) as f32 / 127.0;
-                    let channel = (track.channel.value() - 1) as u8;
-                    context.send_event(NoteEvent::NoteOn {
-                        timing,
-                        voice_id: None,
-                        channel,
-                        note,
-                        velocity,
-                    });
-                    self.held[t] = Some((note, channel));
-                }
+        // The transport looped or jumped: stop whatever is sounding.
+        if let Some(prev) = self.last_end_beat {
+            if (start_beat - prev).abs() > beats_per_sample * 4.0 {
+                self.release_all_now(context);
             }
         }
+        self.last_end_beat = Some(end_beat);
 
-        // Playheads for the GUI: the step sounding at the end of this block.
-        let last_step = ((end_beat - beats_per_sample) * STEPS_PER_BEAT).floor() as i64;
+        let params = self.params.clone();
+        self.events.clear();
+
         for (t, track) in params.tracks.iter().enumerate() {
-            let step = last_step.rem_euclid(track.length.value() as i64);
-            self.playheads[t].store(step as i32, Ordering::Relaxed);
+            let step_beats = track.step_beats();
+            let gate = step_beats * 0.5;
+            let length = track.length.value() as i64;
+            let pattern = track.current_pattern();
+            let on = track.on.value();
+
+            for (k, beat) in sequencer::block_steps(start_beat, beats_per_sample, num_samples, step_beats) {
+                // Close the previous note at its gate end, or right here at the
+                // latest (e.g. when the rate just got faster).
+                if let Some(h) = self.held[t].take() {
+                    self.push(timing(h.off_beat.min(beat)), false, h.note, h.channel, 0.0);
+                }
+                let step = k.rem_euclid(length) as usize;
+                if on && pattern[step] {
+                    let note = track.step_note(step, &pattern);
+                    let velocity = track.step_velocity(step, &pattern) as f32 / 127.0;
+                    let channel = (track.channel.value() - 1) as u8;
+                    self.push(timing(beat), true, note, channel, velocity);
+                    self.held[t] = Some(Held { note, channel, off_beat: beat + gate });
+                }
+            }
+
+            // Gate ends inside this block with no new step after it.
+            if let Some(h) = self.held[t] {
+                if h.off_beat < end_beat || !on {
+                    self.held[t] = None;
+                    self.push(timing(h.off_beat), false, h.note, h.channel, 0.0);
+                }
+            }
+
+            // Playhead for the GUI: the step sounding at the end of this block.
+            let last = ((end_beat - beats_per_sample) / step_beats).floor() as i64;
+            self.playheads[t].store(last.rem_euclid(length) as i32, Ordering::Relaxed);
+        }
+
+        // Hosts need events in time order; seq keeps same-sample order stable.
+        self.events.sort_unstable_by_key(|e| (e.timing, e.seq));
+        for e in self.events.iter() {
+            context.send_event(if e.on {
+                NoteEvent::NoteOn { timing: e.timing, voice_id: None, channel: e.channel, note: e.note, velocity: e.velocity }
+            } else {
+                NoteEvent::NoteOff { timing: e.timing, voice_id: None, channel: e.channel, note: e.note, velocity: 0.0 }
+            });
         }
 
         ProcessStatus::Normal

@@ -6,7 +6,12 @@ A minimal 4-track euclidean MIDI step sequencer, built in Rust with [nih-plug](h
 
 ## Tracks
 
-Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab's dot lights up when its track fires a note, and dims when the track is off. Every control below is per track.
+Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab's dot lights up when its track fires a note, and dims when the track is off. Every control below is per track, except the **Global** panel.
+
+The controls sit in three panels:
+- **Rhythm + Velocity:** when notes play and how hard.
+- **Pitch + Pitch Ramp:** which notes.
+- **Global:** settings shared by all tracks.
 
 - **ON / OFF** – only track 1 is on by default.
 - **CH** – MIDI channel (defaults: track 1 → ch 1, track 2 → ch 2, …). Drag or scroll.
@@ -24,6 +29,8 @@ Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab
 | E. Steps | 1–32 | Length of the euclidean cycle. It repeats inside the sequence and restarts when the sequence wraps. |
 | Pulses | 0–32 | Hits spread evenly over the euclidean cycle (Bjorklund's algorithm, clamped to E. Steps). |
 | Rotate | −16…+16 | Shifts the hits right (+) or left (−), wrapping inside the euclidean cycle. |
+| Rate | 1/64 … 1/1, x2, x4 | How long each step lasts. 1/16 is the default; x2 and x4 mean one step every 2 or 4 bars. |
+| Dot | on / off | Dotted rate: each step lasts 1.5× as long (shown as e.g. `1/8.`). |
 
 **Pitch**
 
@@ -37,12 +44,12 @@ Four independent tracks, one per page. Click the **1–4** tabs to switch. A tab
 
 | Control | Options | What it does |
 |---|---|---|
-| Mode | Off / Up / Down / Random | Up and Down sweep across the whole sequence; Random gives every step a fixed random note. |
+| Mode | Off / Up / Down / Random / Climb / Descend | Up and Down sweep across the whole sequence; Random gives every step a fixed random note. Climb goes up, up, down, repeating (Descend: down, down, up), and wraps back around at the edge of the range. |
 | Range | 1 / 2 / 4 oct | How far the ramp reaches. |
 | Polarity | + / ± | `+` goes from the root upwards; `±` spans below and above the root. |
 | Dice | – | (Random only) re-rolls the random melody. The melody is saved with your project. |
 
-The ramp is tied to step positions, not to hits. So Rotate, Pulses and E. Steps change *which* notes of the contour get played, which makes them a quick way to vary a melody. With a ramp active, each grid cell shows its pitch as a short line (higher line = higher note), and hovering a cell shows its note name.
+Up, Down and Random are tied to step positions, not to hits. So Rotate, Pulses and E. Steps change *which* notes of the contour get played, which makes them a quick way to vary a melody. Climb and Descend follow the notes that actually play, so you always hear the up-up-down figure, and they restart at the top of each loop. With a ramp active, each grid cell shows its pitch as a short line (higher line = higher note), and hovering a cell shows its note name.
 
 **Velocity**
 
@@ -63,9 +70,22 @@ The velocity ramp counts *notes*, not steps, and restarts at the top of each seq
 - Edits stick to their step position and are saved with your project.
 - A plain click on a step still sets the sequence length.
 
-Knobs: drag vertically (Shift = fine), scroll for single steps, double‑click to reset.
+**Global**
 
-Timing: steps are 16th notes locked to the host transport (sample‑accurate), gate is 50 %, velocity 100. The pattern is anchored to the song position, so it stays in sync when you jump around or loop.
+| Control | What it does |
+|---|---|
+| Root | The key (C … B). Changing it moves every track to that key, **keeping each track's octave**, so a bass track stays low. |
+| Scale | Changing it sets every track to that scale. |
+| Following | Lit for each track that still matches the global key and scale. |
+
+The global controls pass their value to all tracks when you change them. After that, changing a track's own Root or Scale only affects that track. They aren't automatable, because that hand-off happens in the plugin window.
+
+**Knobs**
+
+- Drag vertically (Shift = fine), scroll for single steps, double‑click to reset.
+- **Cmd+click** (or Ctrl+click) any numeric knob to type a value: Enter confirms, Esc cancels. Root accepts note names like `F#2`.
+
+Timing: each track runs at its own Rate, locked to the host transport (sample‑accurate), with a 50 % gate. Patterns are anchored to the song position, so they stay in sync when you jump around or loop.
 
 Grid: orange = hit, white = hit under the playhead, small dot = start of each euclidean cycle, dim cells = beyond the sequence length.
 
@@ -93,7 +113,7 @@ GUI without a DAW (dev only):
 cargo run --release --features standalone -- --backend dummy --tempo 120
 ```
 
-Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, pitch and velocity ramps, manual edits, scale math, sample‑accurate tick timing across block sizes):
+Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, pitch and velocity ramps (incl. Climb/Descend), manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
 
 ```sh
 cargo test --lib
@@ -109,10 +129,11 @@ cargo test --lib
 
 - `src/sequencer.rs` – pure logic: Bjorklund, rotation, scales, ramps, note names, block tick timing (unit tested, allocation‑free)
 - `src/lib.rs` – plugin, per-track parameters, MIDI output in `process()`
-- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), knobs, link button, ramps, Clear/Reset
+- `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), panels, knobs with type-in, link button, ramps, global section, Clear/Reset
 
 ## Known notes
 
+- The window size is no longer saved in projects. Earlier versions saved it, which could make projects from an older version open the window too small for newer controls.
 - v0.2 changed every parameter ID (they now carry a `_1`…`_4` track suffix), so projects saved with v0.1 open with default settings.
 
 - `clap-validator` 0.4.1 reports failures in the `state-reproducibility-*` and `state-invalid-random` tests. nih-plug's own reference `gain` example fails the same four tests with the same validator, so this is a framework/validator interaction rather than something in this plugin; all processing, parameter and transport tests pass.

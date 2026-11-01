@@ -4,28 +4,72 @@
 use nih_plug::prelude::Enum;
 
 pub const MAX_STEPS: usize = 32;
-/// Steps are 16th notes. The gate is half a step, so step starts and gate ends
-/// both fall on a 1/32-note "tick" grid: even ticks start steps, odd ticks end gates.
-pub const STEPS_PER_BEAT: f64 = 4.0;
-pub const TICKS_PER_BEAT: f64 = STEPS_PER_BEAT * 2.0;
 
-/// Every tick that falls inside a block, with its sample offset in the block.
-/// A tick exactly on the block start belongs to this block; one exactly on the
-/// end belongs to the next, so no tick is ever doubled or dropped.
-pub fn block_ticks(
+/// How long one step lasts, per track.
+#[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rate {
+    #[name = "1/64"]
+    N64,
+    #[name = "1/32"]
+    N32,
+    #[name = "1/16"]
+    N16,
+    #[name = "1/8"]
+    N8,
+    #[name = "1/4"]
+    N4,
+    #[name = "1/2"]
+    N2,
+    #[name = "1/1"]
+    N1,
+    #[name = "x2"]
+    X2,
+    #[name = "x4"]
+    X4,
+}
+
+impl Rate {
+    /// Step length in beats (quarter notes). x2 / x4 are two / four whole bars
+    /// per step. Dotted steps last 1.5 times as long.
+    pub fn step_beats(self, dotted: bool) -> f64 {
+        let beats = match self {
+            Rate::N64 => 1.0 / 16.0,
+            Rate::N32 => 1.0 / 8.0,
+            Rate::N16 => 0.25,
+            Rate::N8 => 0.5,
+            Rate::N4 => 1.0,
+            Rate::N2 => 2.0,
+            Rate::N1 => 4.0,
+            Rate::X2 => 8.0,
+            Rate::X4 => 16.0,
+        };
+        if dotted {
+            beats * 1.5
+        } else {
+            beats
+        }
+    }
+}
+
+/// Sample offset of `beat` inside a block that starts at `start_beat`.
+pub fn beat_to_timing(beat: f64, start_beat: f64, beats_per_sample: f64, num_samples: usize) -> u32 {
+    (((beat - start_beat) / beats_per_sample).round() as i64).clamp(0, num_samples as i64 - 1) as u32
+}
+
+/// Every step boundary (multiples of `step_beats`, anchored to beat 0) that
+/// falls inside a block, as (global step index, beat position). A boundary
+/// exactly on the block start belongs to this block; one exactly on the end
+/// belongs to the next, so no step is ever doubled or dropped.
+pub fn block_steps(
     start_beat: f64,
     beats_per_sample: f64,
     num_samples: usize,
-) -> impl Iterator<Item = (i64, u32)> {
+    step_beats: f64,
+) -> impl Iterator<Item = (i64, f64)> {
     let end_beat = start_beat + beats_per_sample * num_samples as f64;
-    let first = (start_beat * TICKS_PER_BEAT).ceil() as i64;
-    let end = (end_beat * TICKS_PER_BEAT).ceil() as i64;
-    (first..end).map(move |tick| {
-        let beat = tick as f64 / TICKS_PER_BEAT;
-        let timing = (((beat - start_beat) / beats_per_sample).round() as i64)
-            .clamp(0, num_samples as i64 - 1) as u32;
-        (tick, timing)
-    })
+    let first = (start_beat / step_beats - 1e-9).ceil() as i64;
+    let end = (end_beat / step_beats - 1e-9).ceil() as i64;
+    (first..end).map(move |k| (k, k as f64 * step_beats))
 }
 
 /// Euclidean rhythm E(`pulses`, `steps`) using Bjorklund's algorithm, producing the
@@ -177,6 +221,12 @@ pub enum RampMode {
     Down,
     #[name = "Random"]
     Random,
+    /// Up, up, down, repeating: climbs one scale step every three notes.
+    #[name = "Climb"]
+    Climb,
+    /// Down, down, up, repeating.
+    #[name = "Descend"]
+    Descend,
 }
 
 #[derive(Enum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,10 +272,19 @@ impl Ramp {
         }
     }
 
-    /// Scale-degree offset for `step` in a sequence of `length` steps.
+    /// Climb and Descend follow the notes that play rather than step
+    /// positions, so the up-up-down figure is heard whatever the rhythm.
+    pub fn per_note(&self) -> bool {
+        matches!(self.mode, RampMode::Climb | RampMode::Descend)
+    }
+
+    /// Scale-degree offset for `step` in a sequence of `length` steps, where
+    /// `note_index` is how many notes play before this step in the sequence.
     /// Up/Down sweep linearly across the whole sequence; Random picks a fixed
-    /// degree per step from the seed, so the melody repeats until re-rolled.
-    pub fn degree(&self, step: usize, length: usize, scale: Scale) -> i32 {
+    /// degree per step from the seed, so the melody repeats until re-rolled;
+    /// Climb/Descend move +1 +1 -1 (or -1 -1 +1) per note and wrap around
+    /// inside the range.
+    pub fn degree(&self, step: usize, note_index: usize, length: usize, scale: Scale) -> i32 {
         let (lo, hi) = self.bounds(scale);
         let t = if length > 1 { step as f64 / (length - 1) as f64 } else { 0.0 };
         let sweep = (t * (hi - lo) as f64).round() as i32;
@@ -236,6 +295,15 @@ impl Ramp {
             RampMode::Random => {
                 let r = splitmix64(((self.seed as u64) << 32) | step as u64);
                 lo + (r % (hi - lo + 1) as u64) as i32
+            }
+            RampMode::Climb | RampMode::Descend => {
+                let k = note_index as i32;
+                let rise = (k / 3 + k % 3) % (hi - lo + 1);
+                if self.mode == RampMode::Climb {
+                    lo + rise
+                } else {
+                    hi - rise
+                }
             }
         }
     }
@@ -401,31 +469,57 @@ mod tests {
         }
     }
 
-    /// Process one bar at 120 BPM / 48 kHz in awkward block sizes and check every
-    /// tick lands exactly once, on the right absolute sample.
+    /// Process four bars at 120 BPM / 48 kHz in awkward block sizes, for every
+    /// rate (straight and dotted), and check each step lands exactly once on
+    /// the right absolute sample.
     #[test]
-    fn ticks_are_sample_accurate_across_blocks() {
+    fn steps_are_sample_accurate_across_blocks_and_rates() {
         let sr = 48_000.0;
         let bps = 120.0 / 60.0 / sr; // beats per sample
-        let samples_per_tick = (1.0 / TICKS_PER_BEAT / bps) as u64; // 3000
-        for block in [1usize, 64, 333, 512, 3000, 4096] {
-            let bar = 32 * samples_per_tick;
-            let mut seen = Vec::new();
-            let mut pos = 0u64;
-            while pos < bar {
-                let start = pos as f64 * bps;
-                for (tick, t) in block_ticks(start, bps, block) {
-                    seen.push((tick, pos + t as u64));
+        let span = 16.0; // beats
+        let total = (span / bps) as u64;
+        for rate in [Rate::N64, Rate::N32, Rate::N16, Rate::N8, Rate::N4, Rate::N2, Rate::N1, Rate::X2, Rate::X4] {
+            for dotted in [false, true] {
+                let step = rate.step_beats(dotted);
+                for block in [1usize, 64, 333, 512, 4096] {
+                    let mut seen = Vec::new();
+                    let mut pos = 0u64;
+                    while pos < total {
+                        let start = pos as f64 * bps;
+                        for (k, beat) in block_steps(start, bps, block, step) {
+                            seen.push((k, pos + beat_to_timing(beat, start, bps, block) as u64));
+                        }
+                        pos += block as u64;
+                    }
+                    seen.retain(|&(_, at)| at < total);
+                    let expected: Vec<_> = (0..(span / step - 1e-9).ceil() as i64)
+                        .map(|k| (k, (k as f64 * step / bps).round() as u64))
+                        .collect();
+                    assert_eq!(seen, expected, "{rate:?} dotted={dotted} block={block}");
                 }
-                pos += block as u64;
             }
-            seen.retain(|&(_, at)| at < bar); // last block may run past the bar
-            let expected: Vec<_> = (0..seen.len() as i64)
-                .map(|k| (k, k as u64 * samples_per_tick))
-                .collect();
-            assert_eq!(seen, expected, "block size {block}");
-            assert_eq!(seen.len(), 32, "one bar = 16 steps = 32 ticks");
         }
+    }
+
+    #[test]
+    fn rates() {
+        assert_eq!(Rate::N16.step_beats(false), 0.25);
+        assert_eq!(Rate::N8.step_beats(true), 0.75);
+        assert_eq!(Rate::X4.step_beats(false), 16.0);
+    }
+
+    #[test]
+    fn climb_and_descend() {
+        let climb = ramp(RampMode::Climb, 2, false); // degrees 0..=14
+        let up: Vec<_> = (0..9).map(|n| climb.degree(0, n, 16, Scale::Major)).collect();
+        assert_eq!(up, vec![0, 1, 2, 1, 2, 3, 2, 3, 4]);
+        let descend = ramp(RampMode::Descend, 2, false);
+        let down: Vec<_> = (0..6).map(|n| descend.degree(0, n, 16, Scale::Major)).collect();
+        assert_eq!(down, vec![14, 13, 12, 13, 12, 11]);
+        // Wraps inside the range instead of running away.
+        let small = ramp(RampMode::Climb, 1, true); // -5..=5 in pentatonic
+        assert!((0..200).all(|n| (-5..=5).contains(&small.degree(0, n, 16, Scale::MinorPentatonic))));
+        assert!(climb.per_note() && !ramp(RampMode::Up, 1, false).per_note());
     }
 
     #[test]
@@ -447,7 +541,7 @@ mod tests {
     }
 
     fn degrees(r: Ramp, len: usize, scale: Scale) -> Vec<i32> {
-        (0..len).map(|i| r.degree(i, len, scale)).collect()
+        (0..len).map(|i| r.degree(i, i, len, scale)).collect()
     }
 
     #[test]

@@ -8,11 +8,11 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-use crate::sequencer::{note_name, toggle_override, RampMode, RampRange, Scale, MAX_STEPS};
+use crate::sequencer::{note_name, toggle_override, Rate, RampMode, RampRange, Scale, MAX_STEPS};
 use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS};
 
-const WIDTH: u32 = 910;
-const HEIGHT: u32 = 470;
+const WIDTH: u32 = 950;
+const HEIGHT: u32 = 500;
 
 const BG: Color32 = Color32::from_rgb(0x17, 0x17, 0x19);
 const PANEL: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
@@ -22,6 +22,8 @@ const ACCENT: Color32 = Color32::from_rgb(0xff, 0x8a, 0x1f);
 const ACCENT_DIM: Color32 = Color32::from_rgb(0x7a, 0x47, 0x18);
 const TEXT: Color32 = Color32::from_rgb(0xe8, 0xe6, 0xe3);
 const TEXT_DIM: Color32 = Color32::from_rgb(0x8a, 0x88, 0x86);
+/// Background of the control panels, a shade above the window background.
+const SECTION: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x21);
 
 const KNOB_W: f32 = 60.0;
 const KNOB_H: f32 = 92.0;
@@ -62,7 +64,7 @@ pub fn create(params: Arc<EuclidSeqParams>, playheads: Playheads) -> Option<Box<
                     ui.add_space(14.0);
                     step_grid(ui, track, setter, playhead);
                     ui.add_space(16.0);
-                    controls(ui, track, setter, state.page);
+                    controls(ui, &params, track, setter, state.page);
                 });
             // Keep the playhead animating while the transport runs.
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -135,7 +137,7 @@ fn top_bar(
             let track = &params.tracks[*page];
             value_box(ui, setter, &track.channel, "CH");
             ui.add_space(6.0);
-            pill_toggle(ui, setter, &track.on, "ON", "OFF");
+            pill_toggle(ui, setter, &track.on, "ON", "OFF", "Turn this track on or off");
             ui.add_space(12.0);
             if text_button(ui, "RESET", "Reset this track's settings to their defaults\n(keeps ON and the MIDI channel)") {
                 reset_track(setter, track);
@@ -207,9 +209,11 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
             painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0_f32, TEXT_DIM), StrokeKind::Inside);
         }
 
-        // Pitch contour of the ramp.
-        if active && ramp.mode != RampMode::Off && hi > lo {
-            let deg = ramp.degree(i, length, track.scale.value());
+        // Pitch contour of the ramp. Climb/Descend follow the notes, so they
+        // only have a pitch where a note plays.
+        if active && ramp.mode != RampMode::Off && hi > lo && (hit || !ramp.per_note()) {
+            let note_index = pattern[..i].iter().filter(|&&h| h).count();
+            let deg = ramp.degree(i, note_index, length, track.scale.value());
             let t = (deg - lo) as f32 / (hi - lo) as f32;
             let y = rect.bottom() - 8.0 - t * (cell - 16.0);
             let w = cell * 0.3;
@@ -261,7 +265,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
         }
 
         let hover = if active {
-            let note = note_name(track.step_note(i) as i32);
+            let note = note_name(track.step_note(i, &pattern) as i32);
             let what = if hit {
                 format!("{} · velocity {}", note, track.step_velocity(i, &pattern))
             } else {
@@ -299,85 +303,181 @@ fn group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-fn controls(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, page: usize) {
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 34.0;
+/// Inner height shared by the three panels so their edges line up.
+const PANEL_INNER_H: f32 = 2.0 * (18.0 + KNOB_H) + 14.0;
 
-        group(ui, "RHYTHM", |ui| {
-            let linked = track.link.value();
-            knob(ui, setter, &track.length, "STEPS", KnobStyle::default());
-            link_button(ui, setter, track);
-            // While linked, the E. Steps knob *is* the Steps knob, so both
-            // always move together, including under host automation.
-            if linked {
-                knob(ui, setter, &track.length, "E. STEPS", KnobStyle::default());
-            } else {
-                knob(ui, setter, &track.euclid_steps, "E. STEPS", KnobStyle::default());
+/// A rounded panel that visually groups related sections.
+fn panel(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(SECTION)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(12.0)
+        .show(ui, |ui| {
+            ui.set_min_height(PANEL_INNER_H);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                add(ui)
+            });
+        });
+}
+
+fn scale_combo(ui: &mut Ui, id: impl std::hash::Hash, current: Scale, width: f32) -> Option<Scale> {
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id)
+        .width(width)
+        .selected_text(egui::RichText::new(current.name()).color(TEXT))
+        .show_ui(ui, |ui| {
+            for scale in Scale::ALL {
+                if ui.selectable_label(current == scale, scale.name()).clicked() {
+                    picked = Some(scale);
+                }
             }
-            let pulses = KnobStyle { text: Some(track.effective_pulses().to_string()), ..Default::default() };
-            knob(ui, setter, &track.euclid_pulses, "PULSES", pulses);
-            knob(ui, setter, &track.rotate, "ROTATE", KnobStyle { bipolar: true, ..Default::default() });
         });
+    picked
+}
 
-        group(ui, "PITCH", |ui| {
-            knob(ui, setter, &track.pitch, "PITCH", KnobStyle { bipolar: true, ..Default::default() });
-            knob(ui, setter, &track.root, "ROOT", KnobStyle::default());
-            ui.vertical(|ui| {
-                ui.add_space(DIAL_Y - 20.0);
-                let current = track.scale.value();
-                egui::ComboBox::from_id_salt(("scale", page))
-                    .width(128.0)
-                    .selected_text(egui::RichText::new(current.name()).color(TEXT))
-                    .show_ui(ui, |ui| {
-                        for scale in Scale::ALL {
-                            if ui.selectable_label(current == scale, scale.name()).clicked() {
-                                set(setter, &track.scale, scale);
-                            }
-                        }
-                    });
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("SCALE").color(TEXT_DIM).size(10.5));
-            });
-        });
-    });
-
-    ui.add_space(12.0);
+fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: &ParamSetter, page: usize) {
     ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 34.0;
+        ui.spacing_mut().item_spacing.x = 14.0;
 
-        group(ui, "PITCH RAMP", |ui| {
-            let mode = KnobStyle { stepped: Some(4), ..Default::default() };
-            knob(ui, setter, &track.ramp_mode, "MODE", mode);
-            ui.vertical(|ui| {
-                ui.add_space(6.0);
-                ui.spacing_mut().item_spacing.y = 6.0;
-                let ranges: Vec<_> = RampRange::ALL
-                    .iter()
-                    .map(|&r| (r, format!("{}", r.octaves())))
-                    .collect();
-                segmented(ui, setter, &track.ramp_range, &ranges, 30.0);
-                ui.label(egui::RichText::new("RANGE · OCT").color(TEXT_DIM).size(10.5));
-                segmented(ui, setter, &track.ramp_bipolar, &[(false, "+".into()), (true, "±".into())], 45.0);
-                ui.label(egui::RichText::new("POLARITY").color(TEXT_DIM).size(10.5));
+        // Timing: when notes play and how hard.
+        panel(ui, |ui| {
+            group(ui, "RHYTHM", |ui| {
+                let linked = track.link.value();
+                knob(ui, setter, &track.length, "STEPS", KnobStyle::typeable());
+                link_button(ui, setter, track);
+                // While linked, the E. Steps knob *is* the Steps knob, so both
+                // always move together, including under host automation.
+                if linked {
+                    knob(ui, setter, &track.length, "E. STEPS", KnobStyle::typeable());
+                } else {
+                    knob(ui, setter, &track.euclid_steps, "E. STEPS", KnobStyle::typeable());
+                }
+                let pulses = KnobStyle { text: Some(track.effective_pulses().to_string()), ..KnobStyle::typeable() };
+                knob(ui, setter, &track.euclid_pulses, "PULSES", pulses);
+                knob(ui, setter, &track.rotate, "ROTATE", KnobStyle { bipolar: true, ..KnobStyle::typeable() });
+                let rate_text = format!("{}{}", track.rate, if track.dotted.value() { "." } else { "" });
+                let rate = KnobStyle { stepped: Some(Rate::variants().len()), text: Some(rate_text), ..Default::default() };
+                knob(ui, setter, &track.rate, "RATE", rate);
+                ui.vertical(|ui| {
+                    ui.add_space(DIAL_Y - 12.0);
+                    pill_toggle(ui, setter, &track.dotted, "DOT", "DOT", "Dotted: each step lasts 1.5x as long");
+                    ui.add_space(28.0);
+                    ui.label(egui::RichText::new("DOTTED").color(TEXT_DIM).size(10.5));
+                });
             });
-            let enabled = track.ramp_mode.value() == RampMode::Random;
-            ui.vertical(|ui| {
-                ui.add_space(DIAL_Y - 16.0);
-                dice_button(ui, setter, &track.ramp_seed, enabled);
+            ui.add_space(14.0);
+            group(ui, "VELOCITY", |ui| {
+                knob(ui, setter, &track.velocity, "VELOCITY", KnobStyle::typeable());
+                let mode = KnobStyle { stepped: Some(3), ..Default::default() };
+                knob(ui, setter, &track.vel_mode, "MODE", mode);
+                knob(ui, setter, &track.vel_low, "LOW", KnobStyle::typeable());
+                knob(ui, setter, &track.vel_high, "HIGH", KnobStyle::typeable());
+                // Show the length actually used: capped at the notes in the pattern.
+                let used = (track.vel_length.value() as usize).min(track.note_count()).max(1);
+                let length = KnobStyle { text: Some(used.to_string()), ..KnobStyle::typeable() };
+                knob(ui, setter, &track.vel_length, "LENGTH", length);
             });
         });
 
-        group(ui, "VELOCITY", |ui| {
-            knob(ui, setter, &track.velocity, "VELOCITY", KnobStyle::default());
-            let mode = KnobStyle { stepped: Some(3), ..Default::default() };
-            knob(ui, setter, &track.vel_mode, "MODE", mode);
-            knob(ui, setter, &track.vel_low, "LOW", KnobStyle::default());
-            knob(ui, setter, &track.vel_high, "HIGH", KnobStyle::default());
-            // Show the length actually used: capped at the notes in the pattern.
-            let used = (track.vel_length.value() as usize).min(track.note_count()).max(1);
-            let length = KnobStyle { text: Some(used.to_string()), ..Default::default() };
-            knob(ui, setter, &track.vel_length, "LENGTH", length);
+        // Pitch and its ramp, together.
+        panel(ui, |ui| {
+            group(ui, "PITCH", |ui| {
+                knob(ui, setter, &track.pitch, "PITCH", KnobStyle { bipolar: true, ..KnobStyle::typeable() });
+                knob(ui, setter, &track.root, "ROOT", KnobStyle::typeable());
+                ui.vertical(|ui| {
+                    ui.add_space(DIAL_Y - 12.0);
+                    if let Some(scale) = scale_combo(ui, ("scale", page), track.scale.value(), 118.0) {
+                        set(setter, &track.scale, scale);
+                    }
+                    ui.add_space(22.0);
+                    ui.label(egui::RichText::new("SCALE").color(TEXT_DIM).size(10.5));
+                });
+            });
+            ui.add_space(14.0);
+            group(ui, "PITCH RAMP", |ui| {
+                let mode = KnobStyle { stepped: Some(RampMode::variants().len()), ..Default::default() };
+                knob(ui, setter, &track.ramp_mode, "MODE", mode);
+                ui.vertical(|ui| {
+                    ui.add_space(6.0);
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    let ranges: Vec<_> = RampRange::ALL
+                        .iter()
+                        .map(|&r| (r, format!("{}", r.octaves())))
+                        .collect();
+                    segmented(ui, setter, &track.ramp_range, &ranges, 30.0);
+                    ui.label(egui::RichText::new("RANGE · OCT").color(TEXT_DIM).size(10.5));
+                    segmented(ui, setter, &track.ramp_bipolar, &[(false, "+".into()), (true, "±".into())], 45.0);
+                    ui.label(egui::RichText::new("POLARITY").color(TEXT_DIM).size(10.5));
+                });
+                let enabled = track.ramp_mode.value() == RampMode::Random;
+                ui.vertical(|ui| {
+                    ui.add_space(DIAL_Y - 16.0);
+                    dice_button(ui, setter, &track.ramp_seed, enabled);
+                });
+            });
         });
+
+        // Settings shared by all tracks.
+        panel(ui, |ui| global_section(ui, params, setter));
+    });
+}
+
+/// Global key and scale. Changing them here copies them to every track;
+/// changing a track's own Root/Scale afterwards only affects that track.
+fn global_section(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter) {
+    ui.label(egui::RichText::new("GLOBAL").color(TEXT_DIM).size(10.5).strong());
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.add_space(28.0);
+        let key = KnobStyle { text: Some(params.global_root.to_string()), ..KnobStyle::typeable() };
+        if let Some(pc) = knob(ui, setter, &params.global_root, "ROOT", key) {
+            // New key, same octave for every track.
+            for track in params.tracks.iter() {
+                let current = track.root.value();
+                let mut root = current - current.rem_euclid(12) + pc;
+                while root > 96 {
+                    root -= 12;
+                }
+                while root < 24 {
+                    root += 12;
+                }
+                set(setter, &track.root, root);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    if let Some(scale) = scale_combo(ui, "global_scale", params.global_scale.value(), 112.0) {
+        set(setter, &params.global_scale, scale);
+        for track in params.tracks.iter() {
+            set(setter, &track.scale, scale);
+        }
+    }
+    ui.label(egui::RichText::new("SCALE").color(TEXT_DIM).size(10.5));
+    ui.add_space(14.0);
+
+    // Which tracks still match the global key and scale.
+    ui.label(egui::RichText::new("FOLLOWING").color(TEXT_DIM).size(10.5));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (pc, scale) = (params.global_root.value(), params.global_scale.value());
+        for (t, track) in params.tracks.iter().enumerate() {
+            let follows = track.follows_global(pc, scale);
+            let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(rect, CornerRadius::same(4), if follows { ACCENT } else { PANEL });
+            p.text(rect.center(), Align2::CENTER_CENTER, format!("{}", t + 1), FontId::monospace(11.0), if follows { BG } else { TEXT_DIM });
+            resp.on_hover_text(if follows {
+                format!("Track {} uses the global key and scale", t + 1)
+            } else {
+                format!(
+                    "Track {} has its own key or scale ({} {})\nChange a global setting to bring it back in line",
+                    t + 1,
+                    note_name(track.root.value()),
+                    track.scale.value().name()
+                )
+            });
+        }
     });
 }
 
@@ -434,13 +534,29 @@ struct KnobStyle {
     stepped: Option<usize>,
     /// Override the value text.
     text: Option<String>,
+    /// Cmd/Ctrl+click lets you type a value.
+    typeable: bool,
+}
+
+impl KnobStyle {
+    fn typeable() -> Self {
+        Self { typeable: true, ..Default::default() }
+    }
 }
 
 /// Shared drag/scroll/double-click behaviour for knobs and value boxes.
-fn param_interaction<P: Param>(ui: &Ui, resp: &Response, setter: &ParamSetter, param: &P, speed: f32) {
+/// Returns the value requested this frame, if any (parameter changes only land
+/// a moment later, so callers that react to a change need it from here).
+fn param_interaction<P: Param>(ui: &Ui, resp: &Response, setter: &ParamSetter, param: &P, speed: f32) -> Option<P::Plain>
+where
+    P::Plain: Copy,
+{
     let drag_id = resp.id.with("drag_value");
+    let mut requested = None;
     if resp.double_clicked() {
-        set(setter, param, param.default_plain_value());
+        let v = param.default_plain_value();
+        set(setter, param, v);
+        requested = Some(v);
     } else if resp.drag_started() {
         setter.begin_set_parameter(param);
         let start = param.unmodulated_normalized_value();
@@ -449,9 +565,12 @@ fn param_interaction<P: Param>(ui: &Ui, resp: &Response, setter: &ParamSetter, p
         // Accumulate in an unquantized value; stepped params snap on their own.
         let fine = ui.input(|i| i.modifiers.shift);
         let speed = if fine { speed / 4.0 } else { speed };
-        let mut v: f32 = ui.memory(|m| m.data.get_temp(drag_id)).unwrap_or(0.0);
-        v = (v - resp.drag_delta().y * speed).clamp(0.0, 1.0);
+        let start: f32 = ui.memory(|m| m.data.get_temp(drag_id)).unwrap_or(0.0);
+        let v = (start - resp.drag_delta().y * speed).clamp(0.0, 1.0);
         ui.memory_mut(|m| m.data.insert_temp(drag_id, v));
+        if param.preview_normalized(param.preview_plain(v)) != param.preview_normalized(param.preview_plain(start)) {
+            requested = Some(param.preview_plain(v));
+        }
         setter.set_parameter_normalized(param, v);
     }
     if resp.drag_stopped() {
@@ -467,16 +586,81 @@ fn param_interaction<P: Param>(ui: &Ui, resp: &Response, setter: &ParamSetter, p
                 param.previous_step(current, false)
             };
             set(setter, param, next);
+            requested = Some(next);
         }
     }
+    requested
+}
+
+/// Is the "edit" modifier held? Cmd on macOS, but also Ctrl: hosts often keep
+/// the Cmd key to themselves, while Ctrl always reaches the plugin with clicks.
+fn edit_modifier(ui: &Ui) -> bool {
+    ui.input(|i| i.modifiers.mac_cmd || i.modifiers.command || i.modifiers.ctrl)
+}
+
+/// Text entry over a knob's value. Returns the value committed this frame.
+fn type_in<P: Param>(ui: &mut Ui, setter: &ParamSetter, param: &P, at: Rect, edit_id: Id) -> Option<P::Plain> {
+    let mut buf: String = ui.memory(|m| m.data.get_temp(edit_id))?;
+    let te_id = edit_id.with("field");
+    let resp = ui.put(
+        at,
+        egui::TextEdit::singleline(&mut buf)
+            .id(te_id)
+            .font(FontId::monospace(13.0))
+            .horizontal_align(egui::Align::Center)
+            .text_color(ACCENT)
+            .frame(true)
+            .margin(vec2(2.0, 2.0)),
+    );
+    let first_frame: bool = ui.memory(|m| m.data.get_temp(edit_id.with("new"))).unwrap_or(false);
+    if first_frame {
+        resp.request_focus();
+        ui.memory_mut(|m| m.data.remove::<bool>(edit_id.with("new")));
+    }
+    if resp.lost_focus() || (!first_frame && !resp.has_focus()) {
+        ui.memory_mut(|m| m.data.remove::<String>(edit_id));
+        // Enter or clicking away confirms; Escape cancels.
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return None;
+        }
+        let normalized = param.string_to_normalized_value(buf.trim())?;
+        setter.begin_set_parameter(param);
+        setter.set_parameter_normalized(param, normalized);
+        setter.end_set_parameter(param);
+        return Some(param.preview_plain(normalized));
+    }
+    ui.memory_mut(|m| m.data.insert_temp(edit_id, buf));
+    None
 }
 
 /// Rotary knob: drag vertically (Shift for fine), scroll for single steps,
 /// double-click to reset.
-fn knob<P: Param>(ui: &mut Ui, setter: &ParamSetter, param: &P, label: &str, style: KnobStyle) {
+fn knob<P: Param>(ui: &mut Ui, setter: &ParamSetter, param: &P, label: &str, style: KnobStyle) -> Option<P::Plain>
+where
+    P::Plain: Copy,
+{
     let (rect, resp) = ui.allocate_exact_size(vec2(KNOB_W, KNOB_H), Sense::click_and_drag());
     let speed = if style.stepped.is_some() { 0.012 } else { 0.006 };
-    param_interaction(ui, &resp, setter, param, speed);
+    let edit_id = resp.id.with("type_in");
+    let value_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 70.0), vec2(KNOB_W - 2.0, 20.0));
+
+    let mut requested = None;
+    if style.typeable && resp.clicked() && edit_modifier(ui) {
+        // Start typing, prefilled with the current value.
+        let current = param.normalized_value_to_string(param.unmodulated_normalized_value(), false);
+        ui.memory_mut(|m| {
+            m.data.insert_temp(edit_id, current);
+            m.data.insert_temp(edit_id.with("new"), true);
+        });
+    } else {
+        requested = param_interaction(ui, &resp, setter, param, speed);
+    }
+    let editing = ui.memory(|m| m.data.get_temp::<String>(edit_id).is_some());
+    if editing {
+        if let Some(v) = type_in(ui, setter, param, value_rect, edit_id) {
+            requested = Some(v);
+        }
+    }
 
     let painter = ui.painter_at(rect);
     let center = pos2(rect.center().x, rect.top() + DIAL_Y);
@@ -518,17 +702,24 @@ fn knob<P: Param>(ui: &mut Ui, setter: &ParamSetter, param: &P, label: &str, sty
     let tip = center + vec2(angle.cos(), angle.sin()) * (radius - 9.0);
     painter.line_segment([center, tip], Stroke::new(2.0_f32, TEXT));
 
-    let value = style.text.unwrap_or_else(|| param.to_string());
-    painter.text(
-        pos2(center.x, rect.top() + 70.0),
-        Align2::CENTER_CENTER,
-        value,
-        FontId::monospace(13.0),
-        if resp.hovered() || resp.dragged() { ACCENT } else { TEXT },
-    );
+    if !editing {
+        let value = style.text.unwrap_or_else(|| param.to_string());
+        painter.text(
+            pos2(center.x, rect.top() + 70.0),
+            Align2::CENTER_CENTER,
+            value,
+            FontId::monospace(13.0),
+            if resp.hovered() || resp.dragged() { ACCENT } else { TEXT },
+        );
+    }
     painter.text(pos2(center.x, rect.top() + 86.0), Align2::CENTER_CENTER, label, FontId::proportional(10.5), TEXT_DIM);
 
-    resp.on_hover_text("Drag (Shift = fine) · scroll · double-click to reset");
+    resp.on_hover_text(if style.typeable {
+        "Drag (Shift = fine) · scroll · double-click to reset · Cmd/Ctrl+click to type"
+    } else {
+        "Drag (Shift = fine) · scroll · double-click to reset"
+    });
+    requested
 }
 
 /// Chain-link toggle drawn at dial height between Steps and E. Steps.
@@ -601,7 +792,7 @@ fn segmented<P: Param>(
     }
 }
 
-fn pill_toggle(ui: &mut Ui, setter: &ParamSetter, param: &BoolParam, on: &str, off: &str) {
+fn pill_toggle(ui: &mut Ui, setter: &ParamSetter, param: &BoolParam, on: &str, off: &str, hint: &str) {
     let (rect, resp) = ui.allocate_exact_size(vec2(46.0, 24.0), Sense::click());
     let value = param.value();
     let p = ui.painter();
@@ -616,13 +807,13 @@ fn pill_toggle(ui: &mut Ui, setter: &ParamSetter, param: &BoolParam, on: &str, o
     if resp.clicked() {
         set(setter, param, !value);
     }
-    resp.on_hover_text("Turn this track on or off");
+    resp.on_hover_text(hint);
 }
 
 /// Compact draggable number (used for the MIDI channel).
 fn value_box(ui: &mut Ui, setter: &ParamSetter, param: &IntParam, label: &str) {
     let (rect, resp) = ui.allocate_exact_size(vec2(62.0, 24.0), Sense::click_and_drag());
-    param_interaction(ui, &resp, setter, param, 0.01);
+    let _ = param_interaction(ui, &resp, setter, param, 0.01);
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(5), PANEL);
     let color = if resp.hovered() || resp.dragged() { ACCENT } else { TEXT };
