@@ -570,7 +570,10 @@ impl Plugin for EuclidSeq {
         main_output_channels: NonZeroU32::new(2),
         ..AudioIOLayout::const_default()
     }];
-    const MIDI_INPUT: MidiConfig = MidiConfig::None;
+    // Incoming notes are ignored, but Ableton Live only opens a VST3 with the
+    // instrument category if it has a note input ("plugin has instrument
+    // category, but no valid event input bus").
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::Basic;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
