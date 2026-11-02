@@ -177,6 +177,8 @@ cargo test --lib
 
 ## Known notes
 
+- The plugin has a stereo audio output that is always silent. It only makes MIDI, but Ableton Live refuses to open plugins without an audio output ("This VST3 plug-in could not be opened").
+
 - The window size is no longer saved in projects. Earlier versions saved it, which could make projects from an older version open the window too small for newer controls.
 - v0.9 added scales and reordered the list; v0.8 reordered the ramp modes (Random is now last). Projects saved with older versions are translated on load, so their scales and ramp modes are unchanged.
 - v0.2 changed every parameter ID (they now carry a `_1`…`_4` track suffix), so projects saved with v0.1 open with default settings.

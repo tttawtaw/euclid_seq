@@ -562,8 +562,14 @@ impl Plugin for EuclidSeq {
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // Pure note effect: no audio in or out.
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[];
+    // A silent stereo output. The sequencer only makes MIDI, but Ableton Live
+    // refuses to open plugins without a main audio output ("This VST3 plug-in
+    // could not be opened"), so it gets one that always outputs silence.
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: None,
+        main_output_channels: NonZeroU32::new(2),
+        ..AudioIOLayout::const_default()
+    }];
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::Basic;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
@@ -603,6 +609,10 @@ impl Plugin for EuclidSeq {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let num_samples = buffer.samples();
+        // The audio output only exists for Live's sake: always silence.
+        for channel in buffer.as_slice() {
+            channel.fill(0.0);
+        }
         if std::mem::take(&mut self.flush_held) {
             self.release_all_now(context);
         }
