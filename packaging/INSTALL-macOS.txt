@@ -1,0 +1,20 @@
+Euclid Seq - macOS (Intel and Apple Silicon)
+
+1. Close your DAW.
+2. Open Terminal, go to this folder (type "cd " then drag the folder onto
+   the Terminal window and press Enter), and paste:
+
+   mkdir -p ~/Library/Audio/Plug-Ins/CLAP ~/Library/Audio/Plug-Ins/VST3
+   rm -rf ~/Library/Audio/Plug-Ins/CLAP/euclid_seq.clap ~/Library/Audio/Plug-Ins/VST3/euclid_seq.vst3
+   cp -R euclid_seq.clap ~/Library/Audio/Plug-Ins/CLAP/
+   cp -R euclid_seq.vst3 ~/Library/Audio/Plug-Ins/VST3/
+   xattr -cr ~/Library/Audio/Plug-Ins/CLAP/euclid_seq.clap ~/Library/Audio/Plug-Ins/VST3/euclid_seq.vst3
+
+   The last line stops macOS from blocking the plugin because it was
+   downloaded and isn't signed by a registered developer.
+
+3. Open your DAW:
+   - Bitwig: Euclid Seq (CLAP) appears in the browser. Put it before the instrument.
+   - Ableton Live: Settings > Plug-Ins > turn on "Use VST3 Plug-In System Folders"
+     and Rescan. Put Euclid Seq on its own MIDI track, then set the instrument
+     track's "MIDI From" to that track.

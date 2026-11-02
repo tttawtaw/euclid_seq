@@ -143,6 +143,14 @@ Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 st
 cargo test --lib
 ```
 
+## Builds for every platform (GitHub Actions)
+
+`.github/workflows/build.yml` builds the plugin on GitHub's own machines for **macOS** (one universal build for Intel and Apple Silicon, ad-hoc signed), **Windows x64** and **Linux x64**, and runs the tests on each. It runs on every push to GitHub, or by hand from the repository's **Actions** tab.
+
+- Each run's page lists one zip per platform under **Artifacts**.
+- The run also publishes a **Release** named after the version in `Cargo.toml` (e.g. `v0.9.1`) with the same three zips. Bump the version before pushing to get a new Release.
+- Each zip contains the CLAP and VST3 plugins plus an `INSTALL.txt` for that system (from `packaging/`).
+
 ## Using it in a DAW
 
 - **Bitwig**: drop it on an instrument track *before* the instrument. It's a CLAP note effect, so notes flow straight into the next device.

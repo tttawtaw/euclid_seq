@@ -1,0 +1,14 @@
+Euclid Seq - Windows (x64)
+
+1. Close your DAW.
+2. Copy the files (Windows asks for admin permission):
+   - euclid_seq.clap        into  C:\Program Files\Common Files\CLAP\
+   - the euclid_seq.vst3 folder  into  C:\Program Files\Common Files\VST3\
+   Create the CLAP folder if it doesn't exist.
+3. Open your DAW:
+   - Bitwig: Euclid Seq (CLAP) appears in the browser. Put it before the instrument.
+   - Ableton Live: Options > Preferences > Plug-Ins > turn on "Use VST3 Plug-in
+     System Folder" and Rescan. Put Euclid Seq on its own MIDI track, then set
+     the instrument track's "MIDI From" to that track.
+
+Shortcuts: where the manual says Cmd, use Ctrl (or right-click / right-drag).

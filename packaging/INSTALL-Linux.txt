@@ -1,0 +1,10 @@
+Euclid Seq - Linux (x64)
+
+1. Close your DAW.
+2. In a terminal, in this folder:
+
+   mkdir -p ~/.clap ~/.vst3
+   cp -R euclid_seq.clap ~/.clap/
+   cp -R euclid_seq.vst3 ~/.vst3/
+
+3. Rescan plugins in your DAW. Bitwig and Reaper load the CLAP version.

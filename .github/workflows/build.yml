@@ -1,0 +1,114 @@
+# Builds Euclid Seq for macOS (Intel + Apple Silicon), Windows and Linux on
+# GitHub's own machines, every time you push. Each run's downloads are on the
+# run's page under "Artifacts", and a Release named after the version in
+# Cargo.toml (e.g. v0.9.1) gets one zip per platform.
+name: Build plugins
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos-universal
+          - os: windows-latest
+            name: windows-x64
+          - os: ubuntu-22.04
+            name: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-xcb-dev libxcursor-dev libgl1-mesa-dev libxcb-icccm4-dev libxcb-dri2-0-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --release --lib
+
+      - name: Build (macOS, Intel + Apple Silicon in one)
+        if: runner.os == 'macOS'
+        run: cargo xtask bundle-universal euclid_seq --release
+
+      - name: Build
+        if: runner.os != 'macOS'
+        run: cargo xtask bundle euclid_seq --release
+
+      # Ad-hoc signature: required for plugins to load on Apple Silicon.
+      - name: Sign (macOS, ad-hoc)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - target/bundled/euclid_seq.clap
+          codesign --force --deep --sign - target/bundled/euclid_seq.vst3
+
+      - name: Collect files
+        shell: bash
+        run: |
+          out="dist/euclid_seq-${{ matrix.name }}"
+          mkdir -p "$out"
+          cp -R target/bundled/euclid_seq.clap target/bundled/euclid_seq.vst3 "$out/"
+          cp "packaging/INSTALL-${{ runner.os }}.txt" "$out/INSTALL.txt"
+
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        working-directory: dist
+        run: ditto -c -k --sequesterRsrc --keepParent euclid_seq-${{ matrix.name }} euclid_seq-${{ matrix.name }}.zip
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/euclid_seq-${{ matrix.name }} -DestinationPath dist/euclid_seq-${{ matrix.name }}.zip
+
+      - name: Zip (Linux)
+        if: runner.os == 'Linux'
+        working-directory: dist
+        run: zip -r euclid_seq-${{ matrix.name }}.zip euclid_seq-${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: euclid_seq-${{ matrix.name }}
+          path: dist/euclid_seq-${{ matrix.name }}.zip
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Euclid Seq v${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*.zip
+          body: |
+            Download the zip for your system, unzip it, and follow INSTALL.txt inside.
+            - macOS (Intel and Apple Silicon): euclid_seq-macos-universal.zip
+            - Windows (x64): euclid_seq-windows-x64.zip
+            - Linux (x64): euclid_seq-linux-x64.zip
