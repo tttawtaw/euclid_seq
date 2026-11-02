@@ -79,6 +79,11 @@ pub struct EuclidSeqParams {
     #[id = "g_octave"]
     pub global_octave: IntParam,
 
+    /// Master switch for all tracks. Each track keeps its own ON setting, so
+    /// switching this back on brings back exactly the tracks that were on.
+    #[id = "g_on"]
+    pub global_on: BoolParam,
+
     /// MPC-style swing for every track (50 % = straight, 75 % = maximum):
     /// delays every second step at each track's own rate.
     #[id = "g_swing"]
@@ -434,14 +439,31 @@ impl TrackParams {
         self.rate.value().step_beats(self.dotted.value())
     }
 
-    /// Is this track heard, given ON, Mute and whether any track is soloed?
-    pub fn audible(&self, any_solo: bool) -> bool {
-        self.on.value() && !self.mute.value() && (!any_solo || self.solo.value())
+    /// Is this track heard, given the Global ON switch, its own ON, Mute and
+    /// whether any track is soloed?
+    pub fn audible(&self, mix: Mix) -> bool {
+        mix.master_on && self.on.value() && !self.mute.value() && (!mix.any_solo || self.solo.value())
     }
 
     /// Does this track follow the global key and scale?
     pub fn follows_global(&self, root_pc: i32, scale: Scale) -> bool {
         self.root.value().rem_euclid(12) == root_pc && self.scale.value() == scale
+    }
+}
+
+/// What decides, across tracks, whether a track is heard.
+#[derive(Debug, Clone, Copy)]
+pub struct Mix {
+    pub master_on: bool,
+    pub any_solo: bool,
+}
+
+impl EuclidSeqParams {
+    pub fn mix(&self) -> Mix {
+        Mix {
+            master_on: self.global_on.value(),
+            any_solo: self.tracks.iter().any(|t| t.solo.value()),
+        }
     }
 }
 
@@ -459,6 +481,7 @@ impl Default for EuclidSeqParams {
                 }))
                 .non_automatable(),
             global_scale: EnumParam::new("Global Scale", Scale::Minor).non_automatable(),
+            global_on: BoolParam::new("Global On", true),
             global_swing: IntParam::new("Swing", 50, IntRange::Linear { min: 50, max: 75 }).with_unit("%"),
             global_octave: IntParam::new("Global Octave", 3, IntRange::Linear { min: 0, max: 6 }).non_automatable(),
             tracks: std::array::from_fn(TrackParams::new),
@@ -601,7 +624,7 @@ impl Plugin for EuclidSeq {
         self.events.clear();
         let swing = sequencer::swing_offset(params.global_swing.value() as f64);
 
-        let any_solo = params.tracks.iter().any(|t| t.solo.value());
+        let mix = params.mix();
         for (t, track) in params.tracks.iter().enumerate() {
             let step_beats = track.step_beats();
             let gate = gate_beats(
@@ -614,7 +637,7 @@ impl Plugin for EuclidSeq {
             let len = track.length.value() as usize;
             let dir = track.direction.value();
             let pattern = track.current_pattern();
-            let on = track.audible(any_solo);
+            let on = track.audible(mix);
             let probability = track.probability.value();
 
             // Track off, muted or soloed out: let go of everything right away.
@@ -750,6 +773,21 @@ mod tests {
         assert_eq!(get("ramp_2"), "climb");
         assert_eq!(get("ramp_3"), "updown");
         assert_eq!(get("pitch_1"), "3");
+    }
+
+    #[test]
+    fn global_switch_silences_every_track_without_changing_them() {
+        let params = EuclidSeqParams::default();
+        let track1 = &params.tracks[0]; // on by default
+        let track2 = &params.tracks[1]; // off by default
+        let on = Mix { master_on: true, any_solo: false };
+        let off = Mix { master_on: false, any_solo: false };
+        assert!(track1.audible(on) && !track2.audible(on));
+        assert!(!track1.audible(off) && !track2.audible(off));
+        // The tracks' own switches are untouched by the master.
+        assert!(track1.on.value() && !track2.on.value());
+        assert!(params.global_on.value(), "on by default");
+        assert!(params.mix().master_on);
     }
 
     #[test]

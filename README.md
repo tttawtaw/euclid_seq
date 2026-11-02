@@ -93,6 +93,7 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 | Control | What it does |
 |---|---|
 | Root | The key (C … B). Changing it moves every track to that key, **keeping each track's octave**, so a bass track stays low. |
+| ON / OFF | – | Master switch next to the GLOBAL title: silences every track at once. Each track keeps its own ON setting, so switching back on restores exactly the tracks that were playing. Automatable; saved with the project. |
 | Swing | 50–75 % | MPC-style swing for all tracks: delays every second step at each track's own rate. 50 % = straight, about 66 % = triplet shuffle, 75 % = dotted feel. Automatable. |
 | Octave − / + | Puts every track's root in that octave, keeping each track's note. This brings all tracks into the same register; use a track's own Octave to move it back. |
 | Scale | Changing it sets every track to that scale. |

@@ -13,7 +13,7 @@ use crate::sequencer::{
     RampRange, Scale, MAX_STEPS,
 };
 use crate::presets;
-use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS, STOPPED};
+use crate::{EuclidSeqParams, Mix, TrackParams, NUM_TRACKS, STOPPED};
 
 const WIDTH: u32 = 1020;
 const HEIGHT: u32 = 700;
@@ -136,8 +136,7 @@ pub fn create(params: Arc<EuclidSeqParams>, playheads: Playheads) -> Option<Box<
                     let track = &params.tracks[state.page];
                     let (playhead, loop_idx) = split_playhead(track, playheads[state.page].load(Ordering::Relaxed));
                     ui.add_space(14.0);
-                    let any_solo = params.tracks.iter().any(|t| t.solo.value());
-                    step_grid(ui, track, setter, playhead, loop_idx, any_solo);
+                    step_grid(ui, track, setter, playhead, loop_idx, params.mix());
                     ui.add_space(16.0);
                     controls(ui, &params, track, setter, state.page);
                     ui.add_space(12.0);
@@ -156,8 +155,8 @@ fn set<P: Param>(setter: &ParamSetter, param: &P, value: P::Plain) {
 }
 
 /// Is this track sounding a note right now? Drives the tab activity light.
-fn is_firing(track: &TrackParams, playhead: i32, any_solo: bool) -> bool {
-    track.audible(any_solo)
+fn is_firing(track: &TrackParams, playhead: i32, mix: Mix) -> bool {
+    track.audible(mix)
         && playhead >= 0
         && (playhead as usize) < MAX_STEPS
         && track.current_pattern()[playhead as usize]
@@ -171,7 +170,7 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
 
         // Track tabs: number, dim when the track can't be heard, light when
         // it fires; each followed by its Mute and Solo buttons.
-        let any_solo = params.tracks.iter().any(|t| t.solo.value());
+        let mix = params.mix();
         ui.spacing_mut().item_spacing.x = 3.0;
         for (t, track) in params.tracks.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 26.0), Sense::click());
@@ -182,7 +181,7 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
             if selected {
                 p.rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0_f32, ACCENT_DIM), StrokeKind::Inside);
             }
-            let text_color = match (selected, track.audible(any_solo)) {
+            let text_color = match (selected, track.audible(mix)) {
                 (true, _) => TEXT,
                 (false, true) => TEXT_DIM,
                 (false, false) => CELL_OFF,
@@ -194,9 +193,9 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
                 FontId::monospace(13.0),
                 text_color,
             );
-            let dot = if is_firing(track, split_playhead(track, playheads[t].load(Ordering::Relaxed)).0, any_solo) {
+            let dot = if is_firing(track, split_playhead(track, playheads[t].load(Ordering::Relaxed)).0, mix) {
                 ACCENT
-            } else if track.audible(any_solo) {
+            } else if track.audible(mix) {
                 ACCENT_DIM
             } else {
                 CELL_OFF
@@ -265,15 +264,15 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
 /// `loop_idx` is which pass through the sequence is playing; velocity ramps
 /// longer than the pattern differ from loop to loop, so the grid shows the
 /// current one.
-fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i32, loop_idx: i64, any_solo: bool) {
+fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i32, loop_idx: i64, mix: Mix) {
     let length = track.length.value() as usize;
     let e_steps = track.effective_euclid_steps();
     let pattern = track.current_pattern();
     let added = track.added.load(Ordering::Relaxed);
     let removed = track.removed.load(Ordering::Relaxed);
     let ramp = track.ramp();
-    // Off, muted or soloed out: show the pattern quietly.
-    let on = track.audible(any_solo);
+    // Off (globally or here), muted or soloed out: show the pattern quietly.
+    let on = track.audible(mix);
     let dir = track.direction.value();
     let offsets = track.pitch_offsets.load();
 
@@ -674,7 +673,19 @@ fn controls(ui: &mut Ui, params: &EuclidSeqParams, track: &TrackParams, setter: 
 /// Global key and scale. Changing them here copies them to every track;
 /// changing a track's own Root/Scale afterwards only affects that track.
 fn global_section(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter) {
-    ui.label(egui::RichText::new("GLOBAL").color(TEXT_DIM).size(10.5).strong());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("GLOBAL").color(TEXT_DIM).size(10.5).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            pill_toggle(
+                ui,
+                setter,
+                &params.global_on,
+                "ON",
+                "OFF",
+                "Switch all tracks on or off\n(each track keeps its own ON setting)",
+            );
+        });
+    });
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
