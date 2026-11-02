@@ -14,7 +14,7 @@ The controls sit in three panels:
 - **Global:** settings shared by all tracks.
 
 - **ON / OFF** – only track 1 is on by default. Clicking a track's tab also switches it on, so you hear it straight away. Tracks 2–4 start with 0 pulses, so a newly opened track is a blank canvas.
-- **M / S** (next to each tab) – Mute and Solo. If any track is soloed, only soloed tracks play. A muted or soloed-out track releases its notes immediately, and its tab and grid dim. Paste and per-track Reset leave Mute/Solo alone, like ON and CH; RESET ALL clears them.
+- **M / S** (next to each tab) – Mute and Solo. If any track is soloed, only soloed tracks play. Unsoloing a track while several are soloed clears all solos at once. A muted or soloed-out track releases its notes immediately, and its tab and grid dim. Paste and per-track Reset leave Mute/Solo alone, like ON and CH; RESET ALL clears them.
 - **RANDOM** – new random values for this track's Steps, E. Steps (follows Steps when linked), Pulses (at least 1), Pitch, ramp Mode, ramp Range (1/2/4 oct) and ramp Length. Ranges are kept musical (4–32 steps). It doesn't touch the FREE switch, so the new Length only takes effect once FREE is on.
 - **CH** – MIDI channel (defaults: track 1 → ch 1, track 2 → ch 2, …). Drag or scroll.
 - **COPY / PASTE** – copy a track, go to another and paste it as a starting point for a variation. Everything is copied (pattern, hand-placed notes, step pitches, all settings) except the target's ON switch and MIDI channel, so it keeps playing its own instrument. The COPY button shows which track is on the clipboard, and the clipboard lasts as long as the plugin is loaded.

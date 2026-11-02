@@ -13,7 +13,7 @@ use crate::sequencer::{
     RampRange, Scale, MAX_STEPS,
 };
 use crate::presets;
-use crate::{EuclidSeqParams, Mix, TrackParams, NUM_TRACKS, STOPPED};
+use crate::{solo_after_click, EuclidSeqParams, Mix, TrackParams, NUM_TRACKS, STOPPED};
 
 const WIDTH: u32 = 1020;
 const HEIGHT: u32 = 700;
@@ -209,8 +209,21 @@ fn top_bar(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter, playhead
                 }
             }
             resp.on_hover_text(format!("Track {} (opening it turns it on)", t + 1));
-            flag_button(ui, setter, &track.mute, "M", MUTE_COLOR, &format!("Mute track {}", t + 1));
-            flag_button(ui, setter, &track.solo, "S", SOLO_COLOR, &format!("Solo track {}\n(when any track is soloed, only soloed tracks play)", t + 1));
+            if flag_button(ui, &track.mute, "M", MUTE_COLOR, &format!("Mute track {}", t + 1)) {
+                set(setter, &track.mute, !track.mute.value());
+            }
+            let solo_hint = format!(
+                "Solo track {}\n(when any track is soloed, only soloed tracks play;\nunsoloing one of several soloed tracks clears all solos)",
+                t + 1
+            );
+            if flag_button(ui, &track.solo, "S", SOLO_COLOR, &solo_hint) {
+                let solos = std::array::from_fn(|i| params.tracks[i].solo.value());
+                for (track, solo) in params.tracks.iter().zip(solo_after_click(solos, t)) {
+                    if track.solo.value() != solo {
+                        set(setter, &track.solo, solo);
+                    }
+                }
+            }
             ui.add_space(7.0);
         }
         ui.spacing_mut().item_spacing.x = 8.0;
@@ -1021,17 +1034,17 @@ fn preset_bar(ui: &mut Ui, setter: &ParamSetter, state: &mut EditorState) {
 }
 
 /// Small square toggle for Mute / Solo, lit in `color` when on.
-fn flag_button(ui: &mut Ui, setter: &ParamSetter, param: &BoolParam, label: &str, color: Color32, hint: &str) {
+/// Returns true when clicked; the caller decides what changes.
+fn flag_button(ui: &mut Ui, param: &BoolParam, label: &str, color: Color32, hint: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 26.0), Sense::click());
     let value = param.value();
     let p = ui.painter();
     let fill = if value { color } else if resp.hovered() { CELL_OFF } else { PANEL };
     p.rect_filled(rect, CornerRadius::same(4), fill);
     p.text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(11.0), if value { BG } else { TEXT_DIM });
-    if resp.clicked() {
-        set(setter, param, !value);
-    }
+    let clicked = resp.clicked();
     resp.on_hover_text(hint);
+    clicked
 }
 
 /// New random values for the rhythm and melody shape of a track: Steps,

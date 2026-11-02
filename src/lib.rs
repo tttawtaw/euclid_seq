@@ -467,6 +467,19 @@ impl EuclidSeqParams {
     }
 }
 
+/// Solo states after clicking a track's S button: unsoloing a track while
+/// several are soloed clears every solo; otherwise just that track toggles.
+pub fn solo_after_click(solos: [bool; NUM_TRACKS], clicked: usize) -> [bool; NUM_TRACKS] {
+    let soloed = solos.iter().filter(|&&s| s).count();
+    if solos[clicked] && soloed > 1 {
+        [false; NUM_TRACKS]
+    } else {
+        let mut next = solos;
+        next[clicked] = !next[clicked];
+        next
+    }
+}
+
 impl Default for EuclidSeqParams {
     fn default() -> Self {
         Self {
@@ -788,6 +801,18 @@ mod tests {
         assert!(track1.on.value() && !track2.on.value());
         assert!(params.global_on.value(), "on by default");
         assert!(params.mix().master_on);
+    }
+
+    #[test]
+    fn unsoloing_one_of_several_clears_all_solos() {
+        // One soloed: clicking it unsolos just it; clicking another adds it.
+        assert_eq!(solo_after_click([true, false, false, false], 0), [false; 4]);
+        assert_eq!(solo_after_click([true, false, false, false], 2), [true, false, true, false]);
+        // Several soloed: unsoloing any of them clears every solo.
+        assert_eq!(solo_after_click([true, false, true, false], 2), [false; 4]);
+        assert_eq!(solo_after_click([true, true, true, true], 1), [false; 4]);
+        // Soloing another track while several are soloed still just adds it.
+        assert_eq!(solo_after_click([true, true, false, false], 3), [true, true, false, true]);
     }
 
     #[test]
