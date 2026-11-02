@@ -66,10 +66,48 @@ pub fn block_steps(
     num_samples: usize,
     step_beats: f64,
 ) -> impl Iterator<Item = (i64, f64)> {
+    block_onsets(start_beat, beats_per_sample, num_samples, step_beats, 0.0)
+}
+
+/// How late swung steps play, as a fraction of a step, for an MPC-style swing
+/// amount: 50 % = straight, 66.7 % = triplet shuffle (1/3 step late),
+/// 75 % = dotted feel (1/2 step late). The swing amount is where the second
+/// step of each pair lands within the pair.
+pub fn swing_offset(swing_percent: f64) -> f64 {
+    ((swing_percent - 50.0) / 50.0).clamp(0.0, 0.5)
+}
+
+/// Every step *onset* inside a block, as (global step index, beat). Odd steps
+/// (the second of each pair) are delayed by `swing` steps. Same rule as
+/// `block_steps`: an onset on the block start belongs to this block, one on
+/// the end to the next, so none is doubled or dropped.
+pub fn block_onsets(
+    start_beat: f64,
+    beats_per_sample: f64,
+    num_samples: usize,
+    step_beats: f64,
+    swing: f64,
+) -> impl Iterator<Item = (i64, f64)> {
     let end_beat = start_beat + beats_per_sample * num_samples as f64;
-    let first = (start_beat / step_beats - 1e-9).ceil() as i64;
-    let end = (end_beat / step_beats - 1e-9).ceil() as i64;
-    (first..end).map(move |k| (k, k as f64 * step_beats))
+    let (su, eu) = (start_beat / step_beats - 1e-9, end_beat / step_beats - 1e-9);
+    let first = su.floor() as i64 - 1;
+    let last = eu.ceil() as i64;
+    (first..=last).filter_map(move |k| {
+        let u = k as f64 + if k.rem_euclid(2) == 1 { swing } else { 0.0 };
+        (u >= su && u < eu).then(|| (k, u * step_beats))
+    })
+}
+
+/// The global step sounding at `beat`, taking swing into account (a swung step
+/// only starts once its delayed onset has passed).
+pub fn step_at(beat: f64, step_beats: f64, swing: f64) -> i64 {
+    let u = beat / step_beats;
+    let k = u.floor() as i64;
+    if k.rem_euclid(2) == 1 && u < k as f64 + swing {
+        k - 1
+    } else {
+        k
+    }
 }
 
 /// Euclidean rhythm E(`pulses`, `steps`) using Bjorklund's algorithm, producing the
@@ -747,6 +785,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// With swing, every onset still lands exactly once across awkward block
+    /// sizes, odd steps are delayed by the right amount, and 50 % is straight.
+    #[test]
+    fn swing_is_sample_accurate_across_blocks() {
+        let sr = 48_000.0;
+        let bps = 120.0 / 60.0 / sr;
+        let step = Rate::N16.step_beats(false);
+        let total = (8.0 / bps) as u64; // two bars
+        for swing_pct in [50.0, 58.0, 66.666_666_7, 75.0] {
+            let swing = swing_offset(swing_pct);
+            for block in [1usize, 64, 333, 4096] {
+                let mut seen = Vec::new();
+                let mut pos = 0u64;
+                while pos < total {
+                    let start = pos as f64 * bps;
+                    for (k, beat) in block_onsets(start, bps, block, step, swing) {
+                        seen.push((k, pos + beat_to_timing(beat, start, bps, block) as u64));
+                    }
+                    pos += block as u64;
+                }
+                seen.retain(|&(_, at)| at < total);
+                let expected: Vec<_> = (0..32i64)
+                    .map(|k| {
+                        let u = k as f64 + if k % 2 == 1 { swing } else { 0.0 };
+                        (k, (u * step / bps).round() as u64)
+                    })
+                    .collect();
+                assert_eq!(seen, expected, "swing {swing_pct} block {block}");
+            }
+        }
+        assert_eq!(swing_offset(50.0), 0.0);
+        assert!((swing_offset(66.666_666_7) - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(swing_offset(75.0), 0.5);
+        // The playhead stays on the even step until the swung one starts.
+        assert_eq!(step_at(1.30 * 0.25, 0.25, 0.5), 0);
+        assert_eq!(step_at(1.60 * 0.25, 0.25, 0.5), 1);
+        assert_eq!(step_at(2.10 * 0.25, 0.25, 0.5), 2);
     }
 
     #[test]

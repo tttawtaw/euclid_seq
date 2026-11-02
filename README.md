@@ -93,6 +93,7 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 | Control | What it does |
 |---|---|
 | Root | The key (C … B). Changing it moves every track to that key, **keeping each track's octave**, so a bass track stays low. |
+| Swing | 50–75 % | MPC-style swing for all tracks: delays every second step at each track's own rate. 50 % = straight, about 66 % = triplet shuffle, 75 % = dotted feel. Automatable. |
 | Octave − / + | Puts every track's root in that octave, keeping each track's note. This brings all tracks into the same register; use a track's own Octave to move it back. |
 | Scale | Changing it sets every track to that scale. |
 | Following | Lit for each track that still matches the global key and scale. |
@@ -103,6 +104,15 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 CLEAR ALL and RESET ALL ask for a second click ("SURE?") within 3 seconds, because hand-placed notes can't be brought back with your DAW's undo.
 
 The global controls pass their value to all tracks when you change them. After that, changing a track's own Root or Scale only affects that track. They aren't automatable, because that hand-off happens in the plugin window.
+
+**Presets** (bar along the bottom)
+
+- **Load:** pick a preset from the list. It loads straight away, even while playing.
+- **Save:** type a name and click **SAVE**. With the name box empty, it saves as "Preset 1", "Preset 2", … Saving over an existing name shows **REPLACE?**; click again within 3 seconds to confirm.
+- **FOLDER:** opens the preset folder in Finder / Explorer, where you can rename, delete, back up or share presets (each is one `.json` file).
+- A preset is the whole plugin: all four tracks (including hand-placed notes and step pitches) and the Global settings.
+- Presets live in `Documents/Euclid Seq/Presets` in your home folder, on macOS and Windows alike. The first time, macOS may ask whether your DAW can access the Documents folder: allow it.
+- Presets from older versions load like old projects (scales and ramp modes are translated).
 
 **Knobs**
 
@@ -137,7 +147,7 @@ GUI without a DAW (dev only):
 cargo run --release --features standalone -- --backend dummy --tempo 120
 ```
 
-Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend, free-length drift and semitone ranges in every scale), velocity ramp shapes, new scales, migration of old projects, manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
+Tests (euclidean patterns checked against all 560 Bjorklund patterns up to 32 steps, rotation, playback directions, probability, gate lengths, pitch and velocity ramps (incl. Climb/Descend, free-length drift and semitone ranges in every scale), velocity ramp shapes, new scales, migration of old projects, swing timing at every rate and block size, preset save/load, manual edits, scale math, sample‑accurate step timing for every rate (straight and dotted) across block sizes):
 
 ```sh
 cargo test --lib
@@ -161,6 +171,7 @@ cargo test --lib
 
 - `src/sequencer.rs` – pure logic: Bjorklund, rotation, scales, ramps, note names, block tick timing (unit tested, allocation‑free)
 - `src/lib.rs` – plugin, per-track parameters, MIDI output in `process()`
+- `src/presets.rs` – preset files (save, list, load, folder)
 - `src/editor.rs` – egui GUI: track pages, step grid (incl. manual edits), panels, knobs with type-in, step pitch dragging, link button, ramps, global section, Mute/Solo, Random, Copy/Paste, Clear/Reset (per track and all)
 
 ## Known notes

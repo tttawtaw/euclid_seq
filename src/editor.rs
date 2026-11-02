@@ -12,10 +12,11 @@ use crate::sequencer::{
     cell_step_in_pass, note_name, play_pos, splitmix64, toggle_override, Direction, GateUnit, Rate, RampMode,
     RampRange, Scale, MAX_STEPS,
 };
+use crate::presets;
 use crate::{EuclidSeqParams, TrackParams, NUM_TRACKS, STOPPED};
 
 const WIDTH: u32 = 1020;
-const HEIGHT: u32 = 640;
+const HEIGHT: u32 = 700;
 
 const BG: Color32 = Color32::from_rgb(0x17, 0x17, 0x19);
 const PANEL: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
@@ -58,6 +59,14 @@ pub fn default_state() -> Arc<EguiState> {
 struct EditorState {
     page: usize,
     clipboard: Option<TrackSnapshot>,
+    /// Text in the preset name box.
+    preset_name: String,
+    /// The preset last loaded or saved, shown in the preset list.
+    current_preset: Option<String>,
+    /// SAVE over an existing preset is armed until this time (second click confirms).
+    overwrite_until: f64,
+    /// A short message under the preset bar: (text, is_error, shown until).
+    status: Option<(String, bool, f64)>,
 }
 
 /// Everything about a track except its ON switch and MIDI channel.
@@ -131,6 +140,8 @@ pub fn create(params: Arc<EuclidSeqParams>, playheads: Playheads) -> Option<Box<
                     step_grid(ui, track, setter, playhead, loop_idx, any_solo);
                     ui.add_space(16.0);
                     controls(ui, &params, track, setter, state.page);
+                    ui.add_space(12.0);
+                    preset_bar(ui, setter, state);
                 });
             // Keep the playhead animating while the transport runs.
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -666,7 +677,7 @@ fn global_section(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter) {
     ui.label(egui::RichText::new("GLOBAL").color(TEXT_DIM).size(10.5).strong());
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        ui.add_space(28.0);
+        ui.spacing_mut().item_spacing.x = 10.0;
         let key = KnobStyle { text: Some(params.global_root.to_string()), ..KnobStyle::typeable() };
         if let Some(pc) = knob(ui, setter, &params.global_root, "ROOT", key) {
             // New key, same octave for every track.
@@ -682,10 +693,12 @@ fn global_section(ui: &mut Ui, params: &EuclidSeqParams, setter: &ParamSetter) {
                 set(setter, &track.root, root);
             }
         }
+        // Swing for every track: 50 % straight, ~66 % triplet shuffle, 75 % max.
+        knob(ui, setter, &params.global_swing, "SWING", KnobStyle::typeable());
     });
     // Global octave: every track's root moves into this octave, keeping its note.
     ui.horizontal(|ui| {
-        ui.add_space(20.0);
+        ui.add_space(-6.0);
         let octave = params.global_octave.value();
         if let Some(new) = octave_stepper(ui, "global_oct", octave, 0, 6) {
             set(setter, &params.global_octave, new);
@@ -894,6 +907,108 @@ fn enum_combo<T: Enum + PartialEq + Copy + 'static>(
         });
 }
 
+/// Bottom bar: pick a preset to load it; type a name and SAVE; FOLDER shows
+/// the preset files. A preset is the whole plugin (all tracks + Global).
+fn preset_bar(ui: &mut Ui, setter: &ParamSetter, state: &mut EditorState) {
+    let now = ui.input(|i| i.time);
+    egui::Frame::new()
+        .fill(SECTION)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(egui::RichText::new("PRESET").color(TEXT_DIM).size(10.5).strong());
+
+                // The list is read from the folder each time it's opened, so
+                // files added or renamed in Finder/Explorer show up.
+                let shown = state.current_preset.clone().unwrap_or_else(|| "—".to_string());
+                let mut to_load = None;
+                egui::ComboBox::from_id_salt("preset_list")
+                    .width(200.0)
+                    .height(360.0)
+                    .selected_text(egui::RichText::new(shown).color(TEXT))
+                    .show_ui(ui, |ui| {
+                        let names = presets::list();
+                        if names.is_empty() {
+                            ui.label(egui::RichText::new("No presets yet").color(TEXT_DIM));
+                        }
+                        for name in names {
+                            let current = state.current_preset.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(current, &name).clicked() {
+                                to_load = Some(name);
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Pick a preset to load it (all tracks and Global settings)");
+                if let Some(name) = to_load {
+                    match presets::load(&name) {
+                        Ok(preset) => {
+                            setter.raw_context.set_state(preset);
+                            state.status = Some((format!("Loaded '{name}'"), false, now + 3.0));
+                            state.preset_name = name.clone();
+                            state.current_preset = Some(name);
+                        }
+                        Err(e) => state.status = Some((e, true, now + 6.0)),
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.preset_name)
+                        .hint_text("Preset name")
+                        .desired_width(170.0),
+                )
+                .on_hover_text("Name for SAVE. Left empty, SAVE picks \"Preset 1\", \"Preset 2\", …");
+
+                // Saving over an existing preset needs a second click.
+                let typed = presets::sanitize(&state.preset_name);
+                let name = if typed.is_empty() { presets::next_free_name() } else { typed };
+                let exists = presets::exists(&name);
+                let armed = exists && now < state.overwrite_until;
+                let (label, hint) = if armed {
+                    ("REPLACE?", format!("Click again to replace '{name}'"))
+                } else {
+                    ("SAVE", format!("Save everything as '{name}'"))
+                };
+                if button(ui, label, &hint, armed) {
+                    if exists && !armed {
+                        state.overwrite_until = now + 3.0;
+                    } else {
+                        state.overwrite_until = 0.0;
+                        match presets::save(&name, &setter.raw_context.get_state()) {
+                            Ok(saved) => {
+                                state.status = Some((format!("Saved '{saved}'"), false, now + 3.0));
+                                state.preset_name = saved.clone();
+                                state.current_preset = Some(saved);
+                            }
+                            Err(e) => state.status = Some((e, true, now + 6.0)),
+                        }
+                    }
+                }
+                let folder_hint = match presets::dir() {
+                    Some(d) => format!("Show the preset files\n{}", d.display()),
+                    None => "Show the preset files".to_string(),
+                };
+                if text_button(ui, "FOLDER", &folder_hint) {
+                    if let Err(e) = presets::open_folder() {
+                        state.status = Some((e, true, now + 6.0));
+                    }
+                }
+
+                if let Some((msg, is_error, until)) = &state.status {
+                    if now < *until {
+                        ui.add_space(8.0);
+                        let color = if *is_error { MUTE_COLOR } else { TEXT_DIM };
+                        ui.label(egui::RichText::new(msg).color(color).size(11.5));
+                    }
+                }
+            });
+        });
+}
+
 /// Small square toggle for Mute / Solo, lit in `color` when on.
 fn flag_button(ui: &mut Ui, setter: &ParamSetter, param: &BoolParam, label: &str, color: Color32, hint: &str) {
     let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 26.0), Sense::click());
@@ -936,10 +1051,15 @@ fn randomize_track(setter: &ParamSetter, track: &TrackParams) {
 
 /// Small text button; returns true when clicked.
 fn text_button(ui: &mut Ui, label: &str, hint: &str) -> bool {
+    button(ui, label, hint, false)
+}
+
+/// Text button; `hot` draws it lit (e.g. waiting for a confirming click).
+fn button(ui: &mut Ui, label: &str, hint: &str, hot: bool) -> bool {
     let width = (label.len() as f32 * 8.0 + 20.0).max(58.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
     let p = ui.painter();
-    let (fill, color) = if resp.is_pointer_button_down_on() {
+    let (fill, color) = if hot || resp.is_pointer_button_down_on() {
         (ACCENT, BG)
     } else if resp.hovered() {
         (CELL_OFF, ACCENT)

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
 mod editor;
+mod presets;
 pub mod sequencer;
 
 use sequencer::{
@@ -54,6 +55,9 @@ pub struct EuclidSeq {
     held: [[Option<Held>; MAX_HELD]; NUM_TRACKS],
     /// Where the previous block ended, to detect loops and jumps.
     last_end_beat: Option<f64>,
+    /// Set by `reset()`: held notes are released at the start of the next
+    /// block, so loading a preset or state mid-play never leaves notes stuck.
+    flush_held: bool,
     /// Pre-allocated event buffer (never grows on the audio thread).
     events: Vec<Pending>,
 }
@@ -74,6 +78,11 @@ pub struct EuclidSeqParams {
     /// every track's root in that octave, keeping its note name.
     #[id = "g_octave"]
     pub global_octave: IntParam,
+
+    /// MPC-style swing for every track (50 % = straight, 75 % = maximum):
+    /// delays every second step at each track's own rate.
+    #[id = "g_swing"]
+    pub global_swing: IntParam,
 
     /// Global scale. Setting it in the GUI copies it to every track.
     #[id = "g_scale"]
@@ -450,6 +459,7 @@ impl Default for EuclidSeqParams {
                 }))
                 .non_automatable(),
             global_scale: EnumParam::new("Global Scale", Scale::Minor).non_automatable(),
+            global_swing: IntParam::new("Swing", 50, IntRange::Linear { min: 50, max: 75 }).with_unit("%"),
             global_octave: IntParam::new("Global Octave", 3, IntRange::Linear { min: 0, max: 6 }).non_automatable(),
             tracks: std::array::from_fn(TrackParams::new),
         }
@@ -463,6 +473,7 @@ impl Default for EuclidSeq {
             playheads: Arc::new(std::array::from_fn(|_| AtomicI64::new(STOPPED))),
             held: [[None; MAX_HELD]; NUM_TRACKS],
             last_end_beat: None,
+            flush_held: false,
             events: Vec::with_capacity(MAX_EVENTS),
         }
     }
@@ -539,8 +550,10 @@ impl Plugin for EuclidSeq {
     }
 
     fn reset(&mut self) {
-        // The host will have flushed notes; just forget ours.
-        self.held = [[None; MAX_HELD]; NUM_TRACKS];
+        // No events can be sent from here. The plugin is also reset after a
+        // preset or state is loaded mid-play, so keep the held notes and send
+        // their note-offs at the start of the next block.
+        self.flush_held = true;
         self.last_end_beat = None;
         for p in self.playheads.iter() {
             p.store(STOPPED, Ordering::Relaxed);
@@ -554,6 +567,9 @@ impl Plugin for EuclidSeq {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let num_samples = buffer.samples();
+        if std::mem::take(&mut self.flush_held) {
+            self.release_all_now(context);
+        }
         let transport = context.transport();
         let sample_rate = transport.sample_rate as f64;
 
@@ -583,6 +599,7 @@ impl Plugin for EuclidSeq {
 
         let params = self.params.clone();
         self.events.clear();
+        let swing = sequencer::swing_offset(params.global_swing.value() as f64);
 
         let any_solo = params.tracks.iter().any(|t| t.solo.value());
         for (t, track) in params.tracks.iter().enumerate() {
@@ -605,7 +622,7 @@ impl Plugin for EuclidSeq {
                 self.release_where(t, |_| true, |_| 0);
             }
 
-            for (k, beat) in sequencer::block_steps(start_beat, beats_per_sample, num_samples, step_beats) {
+            for (k, beat) in sequencer::block_onsets(start_beat, beats_per_sample, num_samples, step_beats, swing) {
                 // Notes whose gate has ended by this step.
                 self.release_where(t, |h| h.off_beat <= beat, |h| timing(h.off_beat));
                 if !on {
@@ -645,7 +662,7 @@ impl Plugin for EuclidSeq {
             self.release_where(t, |h| h.off_beat < end_beat, |h| timing(h.off_beat));
 
             // Playhead for the GUI: global step sounding at the end of this block.
-            let last = ((end_beat - beats_per_sample) / step_beats).floor() as i64;
+            let last = sequencer::step_at(end_beat - beats_per_sample, step_beats, swing);
             self.playheads[t].store(last, Ordering::Relaxed);
         }
 
