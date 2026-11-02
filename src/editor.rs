@@ -26,6 +26,8 @@ const ACCENT: Color32 = Color32::from_rgb(0xff, 0x8a, 0x1f);
 const ACCENT_DIM: Color32 = Color32::from_rgb(0x7a, 0x47, 0x18);
 const TEXT: Color32 = Color32::from_rgb(0xe8, 0xe6, 0xe3);
 const TEXT_DIM: Color32 = Color32::from_rgb(0x8a, 0x88, 0x86);
+/// Quieter than TEXT_DIM: for the version number.
+const VERSION_COLOR: Color32 = Color32::from_rgb(0x55, 0x54, 0x53);
 const MUTE_COLOR: Color32 = Color32::from_rgb(0xd9, 0x4f, 0x4f);
 const SOLO_COLOR: Color32 = Color32::from_rgb(0xe8, 0xc5, 0x47);
 /// Background of the control panels, a shade above the window background.
@@ -141,6 +143,17 @@ pub fn create(params: Arc<EuclidSeqParams>, playheads: Playheads) -> Option<Box<
                     controls(ui, &params, track, setter, state.page);
                     ui.add_space(12.0);
                     preset_bar(ui, setter, state);
+
+                    // Version, discreetly in the bottom-left corner (in the
+                    // window margin, so it never overlaps the controls).
+                    let window = ctx.screen_rect();
+                    ui.painter().with_clip_rect(window).text(
+                        window.left_bottom() + vec2(24.0, -12.0),
+                        Align2::LEFT_CENTER,
+                        concat!("v", env!("CARGO_PKG_VERSION")),
+                        FontId::monospace(10.0),
+                        VERSION_COLOR,
+                    );
                 });
             // Keep the playhead animating while the transport runs.
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
