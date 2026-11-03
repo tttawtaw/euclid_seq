@@ -31,6 +31,7 @@ const VERSION_COLOR: Color32 = Color32::from_rgb(0x55, 0x54, 0x53);
 const MUTE_COLOR: Color32 = Color32::from_rgb(0xd9, 0x4f, 0x4f);
 const SOLO_COLOR: Color32 = Color32::from_rgb(0xe8, 0xc5, 0x47);
 /// Background of the control panels, a shade above the window background.
+const HALF_MARK: Color32 = Color32::from_rgb(0x4a, 0x4a, 0x50);
 const SECTION: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x21);
 
 const KNOB_W: f32 = 60.0;
@@ -317,6 +318,15 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
     let grid_h = cell * 2.0 + gap;
     let (grid_rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), grid_h), Sense::hover());
     let painter = ui.painter_at(grid_rect.expand(4.0));
+
+    // Half-bar marks: a faint tick in the gap after steps 8 and 24, so the
+    // middle of each row is easy to find.
+    for row in 0..2 {
+        let x = grid_rect.min.x + 8.0 * (cell + gap) - gap / 2.0;
+        let y = grid_rect.min.y + row as f32 * (cell + gap) + cell / 2.0;
+        let half = (cell * 0.18).round();
+        painter.line_segment([pos2(x, y - half), pos2(x, y + half)], Stroke::new(1.5_f32, HALF_MARK));
+    }
 
     for i in 0..MAX_STEPS {
         let (row, col) = (i / cols, i % cols);
