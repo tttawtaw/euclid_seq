@@ -1213,7 +1213,11 @@ where
 /// Is the "edit" modifier held? Cmd on macOS, but also Ctrl: hosts often keep
 /// the Cmd key to themselves, while Ctrl always reaches the plugin with clicks.
 fn edit_modifier(ui: &Ui) -> bool {
-    ui.input(|i| i.modifiers.mac_cmd || i.modifiers.command || i.modifiers.ctrl)
+    // `command` is refreshed from every mouse event and carries Ctrl, so it is
+    // always current. `mac_cmd` and `ctrl` only change on key events and get
+    // stuck when the host swallows the key release, so they aren't used; Cmd
+    // is asked from the system instead (see modkeys).
+    ui.input(|i| i.modifiers.command) || crate::modkeys::cmd_held()
 }
 
 /// Text entry over a knob's value. Returns the value committed this frame.

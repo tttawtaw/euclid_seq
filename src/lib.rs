@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 
 mod editor;
+mod modkeys;
 mod presets;
 pub mod sequencer;
 

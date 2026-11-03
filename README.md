@@ -180,6 +180,8 @@ cargo test --lib
 
 - The plugin has a MIDI input (incoming notes are ignored) and a stereo audio output that is always silent. It only makes MIDI, but Ableton Live refuses to open a VST3 instrument without both ("This VST3 plug-in could not be opened"; Live's Log.txt says "no valid event input bus").
 
+- Cmd/Ctrl gestures (Cmd/Ctrl+click, Cmd/Ctrl+drag) check whether the key is held at that moment. Before v0.12.1 the plugin could think Cmd/Ctrl was still held after the host swallowed the key release (e.g. after Cmd+S in Live), so a plain drag on a step changed its pitch instead of its pulses.
+
 - The window size is no longer saved in projects. Earlier versions saved it, which could make projects from an older version open the window too small for newer controls.
 - v0.9 added scales and reordered the list; v0.8 reordered the ramp modes (Random is now last). Projects saved with older versions are translated on load, so their scales and ramp modes are unchanged.
 - v0.2 changed every parameter ID (they now carry a `_1`…`_4` track suffix), so projects saved with v0.1 open with default settings.
