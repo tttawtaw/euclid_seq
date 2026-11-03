@@ -1,6 +1,6 @@
 [package]
 name = "euclid_seq"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2021"
 description = "Minimal euclidean MIDI step sequencer (CLAP / VST3)"
 
