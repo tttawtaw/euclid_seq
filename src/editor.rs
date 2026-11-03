@@ -432,6 +432,38 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
             }
         }
 
+        // Plain drag: end the sequence here (like a click), then up/down sets
+        // the number of pulses, 8 px per pulse like a knob. One gesture, so the
+        // host records it as a single undoable change.
+        let pulse_drag_id = Id::new(("pulse_drag", i));
+        if resp.drag_started_by(egui::PointerButton::Primary) && !edit_mod {
+            set(setter, &track.length, i as i32 + 1);
+            // Pulses can't exceed the euclidean cycle; while linked, the cycle
+            // is the new sequence length.
+            let cycle = if track.link.value() { i as i32 + 1 } else { track.euclid_steps.value() };
+            let start = track.euclid_pulses.value().min(cycle);
+            setter.begin_set_parameter(&track.euclid_pulses);
+            ui.memory_mut(|m| m.data.insert_temp(pulse_drag_id, (start, cycle, 0.0_f32)));
+        }
+        if let Some((start, cycle, acc)) = ui.memory(|m| m.data.get_temp::<(i32, i32, f32)>(pulse_drag_id)) {
+            if resp.dragged() {
+                let acc = acc - resp.drag_delta().y;
+                ui.memory_mut(|m| m.data.insert_temp(pulse_drag_id, (start, cycle, acc)));
+                let pulses = (start + (acc / 8.0).round() as i32).clamp(0, cycle);
+                if pulses != track.euclid_pulses.value() {
+                    setter.set_parameter(&track.euclid_pulses, pulses);
+                }
+                // Show the pulse count on the step while dragging.
+                let badge = Rect::from_center_size(rect.center(), vec2(30.0, 20.0));
+                painter.rect_filled(badge, CornerRadius::same(4), BG);
+                painter.text(badge.center(), Align2::CENTER_CENTER, pulses.to_string(), FontId::monospace(13.0), ACCENT);
+            }
+            if resp.drag_stopped() || !resp.dragged() {
+                setter.end_set_parameter(&track.euclid_pulses);
+                ui.memory_mut(|m| m.data.remove::<(i32, i32, f32)>(pulse_drag_id));
+            }
+        }
+
         // Cmd+click (or Ctrl+click / right-click, which hosts never swallow)
         // toggles the step; a plain click sets the sequence length.
         let edit_click = (resp.clicked() && edit_mod) || resp.secondary_clicked();
@@ -466,7 +498,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
                 o => format!(" · pitch {o:+}"),
             };
             format!(
-                "Step {} · {}{}{}\nClick: end the sequence here\nCmd+click: {} a note\nCmd+drag up/down: change this step's pitch",
+                "Step {} · {}{}{}\nClick: end the sequence here\nDrag up/down: end here + more/fewer pulses\nCmd+click: {} a note\nCmd+drag up/down: change this step's pitch",
                 i + 1,
                 what,
                 manual,
@@ -474,7 +506,7 @@ fn step_grid(ui: &mut Ui, track: &TrackParams, setter: &ParamSetter, playhead: i
                 if hit { "remove" } else { "add" }
             )
         } else {
-            format!("Step {}\nClick: end the sequence here", i + 1)
+            format!("Step {}\nClick: end the sequence here\nDrag up/down: end here + more/fewer pulses", i + 1)
         };
         resp.on_hover_text(hover);
     }

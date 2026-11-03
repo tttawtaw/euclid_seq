@@ -87,6 +87,7 @@ The velocity ramp counts *notes* in the order they're played (so Reverse and Pin
 - Added notes get a corner notch; removed ones keep an outline.
 - Edits stick to their step position and are saved with your project.
 - A plain click on a step still sets the sequence length.
+- **Drag** a step up or down (no modifier key): the sequence ends at that step, like a click, and dragging up adds euclidean pulses while dragging down removes them (8 px per pulse, between 0 and the euclidean cycle length). The count shows on the step while you drag. It's an alternative to the PULSES knob, which works as before.
 
 **Global**
 
